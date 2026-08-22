@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>R6 Soundle Studio</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">R6 SOUNDLE</p>
+        <h1>Studio</h1>
+      </div>
+      <div class="status" id="status">Connecting…</div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar panel">
+        <div class="section-title">
+          <div><p class="eyebrow">LIBRARY</p><h2>Sets</h2></div>
+          <button class="icon-button" id="newSet" title="New set">+</button>
+        </div>
+        <div id="setList" class="set-list"></div>
+        <div class="sidebar-footer">
+          <button id="showCaptures">Capture inbox</button>
+          <button id="showSchedule">Release calendar</button>
+        </div>
+      </aside>
+
+      <section class="editor panel" id="editorPanel">
+        <div class="empty-state" id="emptyState">
+          <span>03</span>
+          <h2>Build one complete game day</h2>
+          <p>Create a set, place the listener and runner markers, then attach one processed capture to each round.</p>
+          <button class="primary" id="emptyNewSet">Create a set</button>
+        </div>
+
+        <div id="editor" hidden>
+          <div class="editor-head">
+            <label class="title-field">
+              <span>Set name</span>
+              <input id="setName" placeholder="Clubhouse roaming set">
+            </label>
+            <label>
+              <span>Map</span>
+              <select id="mapSelect"></select>
+            </label>
+            <div class="editor-actions">
+              <button id="saveSet">Save draft</button>
+              <button class="primary" id="approveSet">Approve set</button>
+            </div>
+          </div>
+
+          <div class="round-tabs" id="roundTabs"></div>
+
+          <div class="editor-grid">
+            <div class="map-card">
+              <div class="map-toolbar">
+                <label><span>Floor</span><select id="floorSelect"></select></label>
+                <div class="marker-tools" id="markerTools">
+                  <button data-tool="listenerPos" class="active"><i class="listener"></i>Listener</button>
+                  <button data-tool="operatorStartPos"><i class="start"></i>Runner start</button>
+                  <button data-tool="targetPos"><i class="target"></i>Target</button>
+                </div>
+              </div>
+              <div class="map-stage" id="mapStage">
+                <img id="mapImage" alt="Selected floor blueprint">
+                <canvas id="mapCanvas"></canvas>
+              </div>
+              <p class="hint">Select a marker, then click its location. Drag a marker to refine it.</p>
+            </div>
+
+            <div class="round-card">
+              <p class="eyebrow" id="roundEyebrow">ROUND 1 OF 3</p>
+              <h2 id="roundHeading">Round 1</h2>
+
+              <label><span>Target operator</span><select id="operatorSelect"></select></label>
+              <label><span>Processed capture</span><select id="captureSelect"></select></label>
+
+              <div class="capture-preview" id="capturePreview">
+                <div class="preview-empty">Attach an approved capture</div>
+              </div>
+
+              <div class="coordinates" id="coordinates"></div>
+              <button id="clearRound" class="danger-text">Clear this round</button>
+            </div>
+          </div>
+
+          <div class="validation" id="validation"></div>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="captureDialog">
+      <form method="dialog" class="dialog-card">
+        <div class="section-title">
+          <div><p class="eyebrow">MEDIA</p><h2>Capture inbox</h2></div>
+          <button class="icon-button" value="cancel">×</button>
+        </div>
+        <p>Run the processor first, then import its <code>capture.json</code>. Review the still, audio, and replay before approving it.</p>
+        <div class="inline-form">
+          <input id="manifestPath" placeholder="D:\captures\round-1\capture.json">
+          <button type="button" class="primary" id="importCapture">Import</button>
+        </div>
+        <div id="captureList" class="capture-list"></div>
+      </form>
+    </dialog>
+
+    <dialog id="scheduleDialog">
+      <form method="dialog" class="dialog-card narrow">
+        <div class="section-title">
+          <div><p class="eyebrow">RELEASES</p><h2>Calendar</h2></div>
+          <button class="icon-button" value="cancel">×</button>
+        </div>
+        <p>Approved sets release at midnight America/New_York. Editing a set after scheduling requires rescheduling its new version.</p>
+        <div class="inline-form three">
+          <input type="date" id="releaseDate">
+          <select id="scheduleSet"></select>
+          <button type="button" class="primary" id="scheduleSetButton">Schedule</button>
+        </div>
+        <div id="scheduleList" class="schedule-list"></div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
+

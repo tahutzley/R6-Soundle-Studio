@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r6soundle.example/schemas/puzzle-set.schema.json",
+  "title": "R6 Soundle Puzzle Set",
+  "type": "object",
+  "required": ["id", "name", "mapSlug", "version", "status", "rounds"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "mapSlug": { "type": "string", "minLength": 1 },
+    "mapAssetVersion": { "type": "string", "minLength": 1 },
+    "version": { "type": "integer", "minimum": 1 },
+    "status": { "enum": ["draft", "ready", "approved", "archived"] },
+    "rounds": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/round" }
+    }
+  },
+  "$defs": {
+    "position": {
+      "type": "object",
+      "required": ["x", "y", "floorKey"],
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "floorKey": { "type": "string", "minLength": 1 },
+        "angle": { "type": "number" }
+      }
+    },
+    "round": {
+      "type": "object",
+      "required": ["position"],
+      "properties": {
+        "position": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "operatorId": { "type": ["string", "null"] },
+        "listenerPos": { "anyOf": [{ "$ref": "#/$defs/position" }, { "type": "null" }] },
+        "operatorStartPos": { "anyOf": [{ "$ref": "#/$defs/position" }, { "type": "null" }] },
+        "targetPos": { "anyOf": [{ "$ref": "#/$defs/position" }, { "type": "null" }] },
+        "captureId": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
+
