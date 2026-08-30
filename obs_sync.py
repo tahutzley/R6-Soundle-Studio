@@ -31,10 +31,11 @@ from urllib.parse import urlparse
 
 
 APP_NAME = "R6 Soundle OBS Sync"
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 PROFILE_NAME = "R6 Soundle 1080p60"
 DEFAULT_OBS_URL = "ws://127.0.0.1:4455"
 DEFAULT_COORDINATOR_PORT = 8765
+LOCAL_CONFIG_PATH = Path(__file__).resolve().with_name("config.local.json")
 START_LEAD_SECONDS = 3.0
 STOP_LEAD_SECONDS = 2.0
 OUTPUT_EVENTS = 1 << 6
@@ -54,7 +55,33 @@ def default_capture_directory() -> Path:
     configured = os.environ.get("R6_SOUNDLE_CAPTURE_DIR")
     if configured:
         return Path(configured).expanduser()
-    return Path(__file__).resolve().parent / "media" / "raw"
+    return Path(__file__).resolve().parent / "videos"
+
+
+def load_obs_password(path: Path = LOCAL_CONFIG_PATH) -> str:
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(settings, dict):
+        return ""
+    password = settings.get("obsWebSocketPassword", "")
+    return password if isinstance(password, str) else ""
+
+
+def save_obs_password(password: str, path: Path = LOCAL_CONFIG_PATH) -> None:
+    settings: dict[str, Any] = {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            settings.update(loaded)
+    except (OSError, json.JSONDecodeError):
+        pass
+    settings["obsWebSocketPassword"] = password
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    temporary_path.replace(path)
 
 
 def wait_until_unix(target_unix: float) -> float:
@@ -485,7 +512,7 @@ class ObsController:
             if status.get("outputActive"):
                 raise SyncError("OBS is already recording")
             safe_id = "".join(character for character in session_id if character.isalnum() or character in "-_")
-            self.capture_directory = self.capture_root / safe_id
+            self.capture_directory = self.capture_root
             self._set_record_directory()
             self._call(
                 "SetProfileParameter",
@@ -977,7 +1004,6 @@ class SyncClient:
                 "schedulerReleasedAt": actual_wait_at,
                 "errorMs": (actual_at - local_start_at) * 1000,
             }
-            self._write_sidecar()
             self._send(
                 {
                     "type": "started",
@@ -1012,7 +1038,6 @@ class SyncClient:
                 "schedulerReleasedAt": actual_wait_at,
                 "errorMs": (actual_at - local_stop_at) * 1000,
             }
-            self._write_sidecar()
             self._send(
                 {
                     "type": "stopped",
@@ -1055,13 +1080,6 @@ class SyncClient:
             except Exception:
                 pass
             return
-
-    def _write_sidecar(self) -> None:
-        if not self.current_session:
-            return
-        self.obs.capture_directory.mkdir(parents=True, exist_ok=True)
-        path = self.obs.capture_directory / f"R6-Soundle-{self.current_session}-sync.json"
-        path.write_text(json.dumps(self.record_info, indent=2), encoding="utf-8")
 
     def close(self) -> None:
         self._closing.set()
@@ -1116,7 +1134,7 @@ class SyncApp:
 
         self.name_var = tk.StringVar(value=os.environ.get("USERNAME") or os.environ.get("USER") or "Player")
         self.obs_url_var = tk.StringVar(value=DEFAULT_OBS_URL)
-        self.obs_password_var = tk.StringVar()
+        self.obs_password_var = tk.StringVar(value=load_obs_password())
         self.room_var = tk.StringVar(value=secrets.token_hex(3).upper())
         self.join_var = tk.StringVar(value=f"127.0.0.1:{DEFAULT_COORDINATOR_PORT}")
         self.obs_status_var = tk.StringVar(value="OBS: not tested")
@@ -1134,7 +1152,7 @@ class SyncApp:
         ).pack(anchor="w", pady=(2, 12))
         ttk.Label(
             outer,
-            text=f"Raw captures: {self.capture_root}",
+            text=f"Raw videos: {self.capture_root}",
         ).pack(anchor="w", pady=(0, 12))
 
         obs_frame = ttk.LabelFrame(outer, text="1. Local OBS", padding=10)
@@ -1211,11 +1229,16 @@ class SyncApp:
         self.events.put((event_type, data))
 
     def _new_obs(self) -> ObsController:
+        password = self.obs_password_var.get()
+        try:
+            save_obs_password(password)
+        except OSError as error:
+            self._queue_log(f"Could not save OBS password locally: {error}")
         if self.obs is not None:
             self.obs.close()
         self.obs = ObsController(
             self.obs_url_var.get().strip(),
-            self.obs_password_var.get(),
+            password,
             self._queue_log,
             self.capture_root,
         )
@@ -1644,6 +1667,11 @@ def self_test() -> None:
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="r6-obs-sync-") as temp_directory:
+        local_config = Path(temp_directory) / "config.local.json"
+        save_obs_password("saved-test-password", local_config)
+        assert load_obs_password(local_config) == "saved-test-password"
+        assert json.loads(local_config.read_text(encoding="utf-8"))["obsWebSocketPassword"] == "saved-test-password"
+
         fake_profile = FakeProfileController()
         fake_profile.capture_directory = Path(temp_directory) / "captures"
         video = fake_profile.install_profile()
@@ -1652,6 +1680,10 @@ def self_test() -> None:
         assert fake_profile.parameters[("SimpleOutput", "RecFormat2")] == "hybrid_mp4"
         assert fake_profile.parameters[("Hotkeys", "OBSBasic.StartRecording")] == NO_HOTKEY_BINDINGS
         assert fake_profile.parameters[("Hotkeys", "OBSBasic.StopRecording")] == NO_HOTKEY_BINDINGS
+        fake_profile.capture_root = Path(temp_directory) / "videos"
+        fake_profile.prepare_session("flat-session")
+        assert fake_profile.capture_directory == fake_profile.capture_root
+        assert fake_profile.parameters[("Output", "FilenameFormatting")] == "R6-Soundle-flat-session"
     print("PASS: standardized OBS profile is 1080p60 Hybrid MP4 without conflicting OBS hotkeys")
 
     class FakeDelayedStartController(ObsController):
@@ -1767,7 +1799,7 @@ def main() -> None:
     parser.add_argument(
         "--capture-directory",
         type=Path,
-        help="directory for raw recordings and synchronization sidecars (default: Studio media\\raw)",
+        help="directory for flat raw video output (default: Studio videos)",
     )
     args = parser.parse_args()
     if args.self_test:

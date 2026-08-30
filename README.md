@@ -44,8 +44,10 @@ scripts\run-obs-sync.bat
 
 Before connecting, open OBS and enable **Tools > WebSocket Server Settings**.
 On both computers, use **Install / Update 1080p60 Profile** once. It creates
-the `R6 Soundle 1080p60` profile and writes recordings and timing sidecars to
-`media\raw\<session-id>`. Raw captures are intentionally ignored by Git.
+the `R6 Soundle 1080p60` profile and writes each raw recording directly to the
+flat `videos` folder. No per-session capture directories or timing sidecars are
+created. Raw videos are intentionally ignored by Git. The OBS WebSocket
+password is saved locally in the ignored `config.local.json` file after use.
 
 The recorder registers `Ctrl+\`` as a global synchronized-session shortcut:
 press it once to send **READY**, then press it again while recording to request
