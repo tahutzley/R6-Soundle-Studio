@@ -47,11 +47,12 @@ On both computers, use **Install / Update 1080p60 Profile** once. It creates
 the `R6 Soundle 1080p60` profile and writes recordings and timing sidecars to
 `media\raw\<session-id>`. Raw captures are intentionally ignored by Git.
 
-The installed profile assigns `Ctrl+\`` to both OBS start- and stop-recording,
-which makes it a local recording toggle. Restart OBS once after installation
-so it loads the new hotkey. For a two-computer capture, continue using
-**READY** and **STOP BOTH** in the recorder; the OBS hotkey is local and does
-not establish a synchronized start boundary.
+The recorder registers `Ctrl+\`` as a global synchronized-session shortcut:
+press it once to send **READY**, then press it again while recording to request
+**STOP BOTH**. When both players are ready, the recorder counts down three
+seconds and starts both OBS recordings at the same synchronized boundary. The
+installed OBS profile intentionally clears OBS's own start/stop bindings for
+this key so one keypress cannot start and immediately stop a local recording.
 
 To use another storage drive, pass `--capture-directory D:\captures` or set
 `R6_SOUNDLE_CAPTURE_DIR` before launching the recorder.

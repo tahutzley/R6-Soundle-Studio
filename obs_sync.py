@@ -31,27 +31,14 @@ from urllib.parse import urlparse
 
 
 APP_NAME = "R6 Soundle OBS Sync"
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 PROFILE_NAME = "R6 Soundle 1080p60"
 DEFAULT_OBS_URL = "ws://127.0.0.1:4455"
 DEFAULT_COORDINATOR_PORT = 8765
-START_LEAD_SECONDS = 5.0
+START_LEAD_SECONDS = 3.0
 STOP_LEAD_SECONDS = 2.0
 OUTPUT_EVENTS = 1 << 6
-TOGGLE_RECORDING_HOTKEY = json.dumps(
-    {
-        "bindings": [
-            {
-                "key": "OBS_KEY_QUOTELEFT",
-                "control": True,
-                "shift": False,
-                "alt": False,
-                "command": False,
-            }
-        ]
-    },
-    separators=(",", ":"),
-)
+NO_HOTKEY_BINDINGS = json.dumps({"bindings": []}, separators=(",", ":"))
 
 
 class SyncError(RuntimeError):
@@ -84,6 +71,70 @@ def wait_until_unix(target_unix: float) -> float:
             time.sleep(left / 2)
         else:
             time.sleep(0.0005)
+
+
+class WindowsGlobalHotkey:
+    """Register Ctrl+` without requiring the recorder window to have focus."""
+
+    WM_HOTKEY = 0x0312
+    WM_QUIT = 0x0012
+    MOD_CONTROL = 0x0002
+    MOD_NOREPEAT = 0x4000
+    VK_OEM_3 = 0xC0
+    HOTKEY_ID = 0x5236
+
+    def __init__(self, callback: Callable[[], None]):
+        self.callback = callback
+        self.error = ""
+        self._ready = threading.Event()
+        self._registered = False
+        self._thread: threading.Thread | None = None
+        self._thread_id: int | None = None
+
+    def start(self) -> bool:
+        if os.name != "nt":
+            self.error = "global Ctrl+` is only available on Windows"
+            return False
+        self._thread = threading.Thread(target=self._message_loop, name="obs-sync-hotkey", daemon=True)
+        self._thread.start()
+        if not self._ready.wait(2.0):
+            self.error = "timed out while registering Ctrl+`"
+            return False
+        return self._registered
+
+    def _message_loop(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._thread_id = int(kernel32.GetCurrentThreadId())
+        modifiers = self.MOD_CONTROL | self.MOD_NOREPEAT
+        if not user32.RegisterHotKey(None, self.HOTKEY_ID, modifiers, self.VK_OEM_3):
+            error_code = ctypes.get_last_error()
+            self.error = f"Windows could not register Ctrl+` (error {error_code}); another app may be using it"
+            self._ready.set()
+            return
+        self._registered = True
+        self._ready.set()
+        message = wintypes.MSG()
+        try:
+            while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+                if message.message == self.WM_HOTKEY and message.wParam == self.HOTKEY_ID:
+                    self.callback()
+        finally:
+            user32.UnregisterHotKey(None, self.HOTKEY_ID)
+            self._registered = False
+
+    def close(self) -> None:
+        if os.name != "nt" or self._thread_id is None:
+            return
+        import ctypes
+
+        ctypes.windll.user32.PostThreadMessageW(self._thread_id, self.WM_QUIT, 0, 0)
+        if self._thread is not None:
+            self._thread.join(0.5)
+        self._thread_id = None
 
 
 class ObsWebSocket:
@@ -379,8 +430,8 @@ class ObsController:
                 ("Video", "ColorFormat", "NV12"),
                 ("Video", "ColorSpace", "709"),
                 ("Video", "ColorRange", "Partial"),
-                ("Hotkeys", "OBSBasic.StartRecording", TOGGLE_RECORDING_HOTKEY),
-                ("Hotkeys", "OBSBasic.StopRecording", TOGGLE_RECORDING_HOTKEY),
+                ("Hotkeys", "OBSBasic.StartRecording", NO_HOTKEY_BINDINGS),
+                ("Hotkeys", "OBSBasic.StopRecording", NO_HOTKEY_BINDINGS),
             )
             for category, name, value in parameters:
                 self._call(
@@ -403,7 +454,7 @@ class ObsController:
             }
             if any(video.get(key) != value for key, value in expected.items()):
                 raise SyncError(f"OBS did not retain the requested 1080p60 settings: {video}")
-            self.log(f"{action} OBS profile '{PROFILE_NAME}' with Ctrl+` recording toggle")
+            self.log(f"{action} OBS profile '{PROFILE_NAME}'; the sync recorder now owns Ctrl+`")
             return video
 
     def _set_record_directory(self) -> None:
@@ -778,6 +829,7 @@ class SyncClient:
         self._sync_pending: dict[str, float] = {}
         self._sync_samples: list[tuple[float, float]] = []
         self.clock_offset = 0.0
+        self.client_id: str | None = None
         self.current_session: str | None = None
         self.stop_scheduled = False
         self.record_info: dict[str, Any] = {}
@@ -836,6 +888,7 @@ class SyncClient:
             self.log(f"Coordinator rejected connection: {message.get('message', 'unknown error')}")
             self.event("error", message)
         elif message_type == "welcome":
+            self.client_id = str(message.get("clientId") or "") or None
             self.log("Joined synchronization room")
             self.event("connected", message)
         elif message_type == "sync_pong":
@@ -1044,6 +1097,8 @@ class SyncApp:
         self.capture_root = capture_root.resolve()
         self.countdown_target: float | None = None
         self.countdown_label_text = ""
+        self.capture_phase = "idle"
+        self.hotkey = WindowsGlobalHotkey(lambda: self.events.put(("capture_hotkey", {})))
 
         self.name_var = tk.StringVar(value=os.environ.get("USERNAME") or os.environ.get("USER") or "Player")
         self.obs_url_var = tk.StringVar(value=DEFAULT_OBS_URL)
@@ -1082,7 +1137,7 @@ class SyncApp:
         ttk.Label(obs_frame, textvariable=self.obs_status_var).grid(row=4, column=1, sticky="w", pady=(6, 0))
         ttk.Label(
             obs_frame,
-            text="Ctrl+` toggles local OBS recording after installing the profile. Use READY / STOP BOTH for synchronized sessions.",
+            text="Ctrl+` works globally: press once to send READY, then press again while recording to STOP BOTH.",
             wraplength=600,
         ).grid(row=5, column=1, sticky="w", pady=(6, 0))
 
@@ -1107,6 +1162,7 @@ class SyncApp:
         self.ready_button.pack(side="left", fill="x", expand=True)
         self.stop_button = ttk.Button(controls, text="STOP BOTH", command=self.stop_both)
         self.stop_button.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        self.stop_button.state(["disabled"])
         ttk.Label(controls, textvariable=self.countdown_var, font=("Segoe UI", 13, "bold")).pack(
             side="left", padx=(14, 0)
         )
@@ -1122,6 +1178,11 @@ class SyncApp:
         ).pack(anchor="w", pady=(8, 0))
         self.root.after(50, self._drain_events)
         self.root.after(50, self._tick_countdown)
+        if self.hotkey.start():
+            self._queue_log("Global Ctrl+` registered: READY when idle, STOP BOTH while recording")
+        else:
+            self.root.bind_all("<Control-grave>", lambda _event: self.events.put(("capture_hotkey", {})))
+            self._queue_log(f"{self.hotkey.error}; Ctrl+` will work only while this window has focus")
 
     def _labeled_entry(self, parent: Any, label: str, variable: Any, row: int, show: str | None = None) -> None:
         self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(0, 8), pady=3)
@@ -1215,6 +1276,10 @@ class SyncApp:
         if self.client is None:
             self._queue_event("error", {"message": "Host or join a room first"})
             return
+        if self.capture_phase != "idle":
+            self._queue_log("Already ready or capturing; wait for the current session to finish")
+            return
+        self.capture_phase = "ready"
         self.ready_button.state(["disabled"])
 
         def action() -> None:
@@ -1228,15 +1293,36 @@ class SyncApp:
         try:
             if self.client is None:
                 raise SyncError("Not connected to a room")
+            if self.capture_phase != "recording":
+                raise SyncError("STOP BOTH is available after synchronized recording starts")
+            self.capture_phase = "stopping"
+            self.stop_button.state(["disabled"])
             self.client.request_stop()
         except Exception as error:
+            if self.capture_phase == "stopping":
+                self.capture_phase = "recording"
+                self.stop_button.state(["!disabled"])
             self._queue_event("error", {"message": str(error)})
+
+    def _capture_hotkey(self) -> None:
+        if self.capture_phase == "idle":
+            self.ready()
+        elif self.capture_phase == "recording":
+            self.stop_both()
+        elif self.capture_phase == "ready":
+            self._queue_log("Ctrl+`: already READY; waiting for the other player")
+        elif self.capture_phase == "countdown":
+            self._queue_log("Ctrl+`: recording is starting; wait for RECORDING before stopping")
+        else:
+            self._queue_log("Ctrl+`: STOP BOTH is already scheduled")
 
     def disconnect_room(self) -> None:
         self._close_network()
         self.room_status_var.set("Room: disconnected")
         self.players_var.set("Players: 0 / 2")
+        self.capture_phase = "idle"
         self.ready_button.state(["!disabled"])
+        self.stop_button.state(["disabled"])
 
     def _close_network(self) -> None:
         if self.client is not None:
@@ -1256,15 +1342,20 @@ class SyncApp:
                     message = data.get("message", "Unknown error")
                     self._append_log(f"ERROR: {message}")
                     self.obs_status_var.set("OBS: check activity log")
-                    self.ready_button.state(["!disabled"])
+                    if self.capture_phase in {"idle", "ready"}:
+                        self.capture_phase = "idle"
+                        self.ready_button.state(["!disabled"])
                 elif event_type == "obs_ok":
                     self.obs_status_var.set(f"OBS: connected ({data.get('obsVersion', '?')})")
                 elif event_type == "profile_ok":
-                    self.obs_status_var.set("OBS: R6 Soundle 1080p60 profile active; restart OBS to load Ctrl+`")
+                    self.obs_status_var.set("OBS: R6 Soundle 1080p60 profile active; recorder owns Ctrl+`")
                 elif event_type == "connected":
                     self.room_status_var.set("Room: connected")
                 elif event_type == "disconnected":
                     self.room_status_var.set("Room: disconnected")
+                    self.capture_phase = "idle"
+                    self.ready_button.state(["!disabled"])
+                    self.stop_button.state(["disabled"])
                 elif event_type == "clock":
                     self.clock_var.set(
                         f"Clock sync: offset {data['offsetMs']:+.1f} ms, best RTT {data['roundTripMs']:.1f} ms"
@@ -1277,20 +1368,31 @@ class SyncApp:
                     )
                     self.players_var.set(f"Players: {len(players)} / 2; ready {ready} / 2{'; ' + names if names else ''}")
                     if not data.get("sessionId"):
-                        self.ready_button.state(["!disabled"])
+                        local_client_id = self.client.client_id if self.client is not None else None
+                        local_ready = any(
+                            player.get("id") == local_client_id and player.get("ready") for player in players
+                        )
+                        self.capture_phase = "ready" if local_ready else "idle"
+                        self.ready_button.state(["disabled"] if local_ready else ["!disabled"])
+                        self.stop_button.state(["disabled"])
                 elif event_type == "ready_sent":
                     self._append_log("Ready status sent")
                 elif event_type == "start_scheduled":
+                    self.capture_phase = "countdown"
                     self.countdown_target = float(data["localStartAt"])
                     self.countdown_label_text = "Recording starts in"
                     self._append_log(f"Session {data['sessionId']} scheduled")
                 elif event_type == "recording":
+                    self.capture_phase = "recording"
                     self.countdown_target = None
                     self.countdown_var.set("RECORDING")
+                    self.stop_button.state(["!disabled"])
                     self._append_log(f"Recording started; scheduler error {data.get('errorMs', 0):+.1f} ms")
                 elif event_type == "stop_scheduled":
+                    self.capture_phase = "stopping"
                     self.countdown_target = float(data["localStopAt"])
                     self.countdown_label_text = "Stops in"
+                    self.stop_button.state(["disabled"])
                     self._append_log(f"Stop scheduled: {data.get('reason', '')}")
                 elif event_type == "stopped":
                     self.countdown_target = None
@@ -1305,7 +1407,11 @@ class SyncApp:
                     self._append_log(f"{data.get('name')} confirmed recording stopped{suffix}")
                 elif event_type == "session_complete":
                     self._append_log(f"Session {data.get('sessionId')} complete; both players can ready again")
+                    self.capture_phase = "idle"
                     self.ready_button.state(["!disabled"])
+                    self.stop_button.state(["disabled"])
+                elif event_type == "capture_hotkey":
+                    self._capture_hotkey()
         except queue.Empty:
             pass
         self.root.after(50, self._drain_events)
@@ -1328,6 +1434,7 @@ class SyncApp:
         self.root.mainloop()
 
     def close(self) -> None:
+        self.hotkey.close()
         self._close_network()
         if self.obs is not None:
             self.obs.close()
@@ -1529,11 +1636,9 @@ def self_test() -> None:
         assert video["outputWidth"] == 1920 and video["fpsNumerator"] == 60
         assert fake_profile.current_profile == PROFILE_NAME
         assert fake_profile.parameters[("SimpleOutput", "RecFormat2")] == "hybrid_mp4"
-        assert json.loads(fake_profile.parameters[("Hotkeys", "OBSBasic.StartRecording")]) == json.loads(
-            TOGGLE_RECORDING_HOTKEY
-        )
-        assert fake_profile.parameters[("Hotkeys", "OBSBasic.StopRecording")] == TOGGLE_RECORDING_HOTKEY
-    print("PASS: standardized OBS profile is created as 1080p60 Hybrid MP4")
+        assert fake_profile.parameters[("Hotkeys", "OBSBasic.StartRecording")] == NO_HOTKEY_BINDINGS
+        assert fake_profile.parameters[("Hotkeys", "OBSBasic.StopRecording")] == NO_HOTKEY_BINDINGS
+    print("PASS: standardized OBS profile is 1080p60 Hybrid MP4 without conflicting OBS hotkeys")
 
     class FakeTimingController:
         def __init__(self, capture_directory: Path):
