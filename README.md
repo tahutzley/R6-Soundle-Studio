@@ -34,6 +34,28 @@ The game checkout supplies the current map manifest, blueprint images, and
 operator catalog while the authoring bundle is being separated. Studio data is
 stored in `studio.db`; processed media is stored under `media\processed`.
 
+## Capture with OBS
+
+Run the two-computer recorder from Studio:
+
+```powershell
+scripts\run-obs-sync.bat
+```
+
+Before connecting, open OBS and enable **Tools > WebSocket Server Settings**.
+On both computers, use **Install / Update 1080p60 Profile** once. It creates
+the `R6 Soundle 1080p60` profile and writes recordings and timing sidecars to
+`media\raw\<session-id>`. Raw captures are intentionally ignored by Git.
+
+The installed profile assigns `Ctrl+\`` to both OBS start- and stop-recording,
+which makes it a local recording toggle. Restart OBS once after installation
+so it loads the new hotkey. For a two-computer capture, continue using
+**READY** and **STOP BOTH** in the recorder; the OBS hotkey is local and does
+not establish a synchronized start boundary.
+
+To use another storage drive, pass `--capture-directory D:\captures` or set
+`R6_SOUNDLE_CAPTURE_DIR` before launching the recorder.
+
 ## Process a two-POV capture
 
 Install FFmpeg and ensure `ffmpeg` and `ffprobe` are on `PATH`, then run:
@@ -68,4 +90,3 @@ python processor\process_capture.py --self-test
 The local data model and media contract are intentionally ready for a hosted
 room service. Next work is the signed room-code relay, resumable uploads, and a
 single-file Windows recorder build so recording helpers do not need this repo.
-

@@ -11,7 +11,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from studio_server import Store, release_at_for_date, validate_set
+from studio_server import Store, load_catalog, release_at_for_date, validate_set
 
 
 class StudioStoreTests(unittest.TestCase):
@@ -56,6 +56,15 @@ class StudioStoreTests(unittest.TestCase):
         self.assertEqual([1, 2, 3], [round_item["position"] for round_item in item["rounds"]])
         self.assertNotIn("difficulty", item["rounds"][0])
 
+    def test_set_can_be_deleted(self) -> None:
+        item = self.store.save_set({"name": "Disposable", "mapSlug": "bank", "rounds": []})
+
+        self.store.delete_set(item["id"])
+
+        self.assertIsNone(self.store.get_set(item["id"]))
+        with self.assertRaisesRegex(KeyError, "Set not found"):
+            self.store.delete_set(item["id"])
+
     def test_incomplete_set_cannot_be_approved(self) -> None:
         item = self.store.save_set({"name": "Test", "mapSlug": "bank"})
         item["status"] = "approved"
@@ -88,6 +97,58 @@ class StudioStoreTests(unittest.TestCase):
     def test_new_york_midnight_handles_daylight_saving(self) -> None:
         self.assertEqual("2026-01-10T05:00:00Z", release_at_for_date("2026-01-10"))
         self.assertEqual("2026-07-10T04:00:00Z", release_at_for_date("2026-07-10"))
+
+    def test_catalog_exposes_browser_ready_operator_artwork(self) -> None:
+        game_repo = self.root / "game"
+        maps_dir = game_repo / "assets" / "maps"
+        data_dir = game_repo / "assets" / "data"
+        maps_dir.mkdir(parents=True)
+        data_dir.mkdir(parents=True)
+        (maps_dir / "blueprint_manifest_wide_upscaled.json").write_text(
+            json.dumps(
+                {
+                    "settings": {"refreshedAt": "test-version"},
+                    "images": [
+                        {
+                            "map_slug": "bank",
+                            "floor_key": "1f",
+                            "ai_output_file": "wide-upscaled/bank_1f.png",
+                            "wide_crop_box": [100, 50, 1500, 850],
+                            "square_crop_box": [400, 100, 1200, 900],
+                            "selector_enabled": True,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (data_dir / "operator_catalog.json").write_text(
+            json.dumps(
+                {
+                    "operators": [
+                        {
+                            "id": "montagne",
+                            "name": "Montagne",
+                            "svgPath": "assets/operators/svg/montagne.svg",
+                            "pngPath": "assets/operators/png/montagne.png",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        catalog = load_catalog(game_repo)
+
+        floor = catalog["maps"][0]["floors"][0]
+        self.assertEqual("1F", floor["label"])
+        self.assertEqual("/game-assets/maps/wide-upscaled/bank_1f.png", floor["imageUrl"])
+        self.assertEqual(
+            {"x": 3 / 14, "y": 1 / 16, "width": 4 / 7, "height": 1},
+            floor["coordinateFrame"],
+        )
+        self.assertEqual("/game-assets/operators/svg/montagne.svg", catalog["operators"][0]["iconUrl"])
+        self.assertEqual("/game-assets/operators/png/montagne.png", catalog["operators"][0]["portraitUrl"])
 
 
 if __name__ == "__main__":

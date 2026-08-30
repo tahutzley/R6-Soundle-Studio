@@ -295,6 +295,13 @@ class Store:
             )
         return self.get_set(item["id"])  # type: ignore[return-value]
 
+    def delete_set(self, set_id: str) -> None:
+        if not self.get_set(set_id):
+            raise KeyError("Set not found")
+        with self.connect() as connection:
+            connection.execute("DELETE FROM schedule_entries WHERE set_id = ?", (set_id,))
+            connection.execute("DELETE FROM puzzle_sets WHERE id = ?", (set_id,))
+
     def list_captures(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM captures ORDER BY created_at DESC").fetchall()
@@ -475,7 +482,7 @@ class Store:
 
 
 def load_catalog(game_repo: Path) -> dict[str, Any]:
-    manifest_path = game_repo / "assets" / "maps" / "blueprint_manifest_upscaled.json"
+    manifest_path = game_repo / "assets" / "maps" / "blueprint_manifest_wide_upscaled.json"
     operator_path = game_repo / "assets" / "data" / "operator_catalog.json"
     if not manifest_path.is_file() or not operator_path.is_file():
         raise FileNotFoundError(f"Game authoring assets were not found under {game_repo}")
@@ -483,15 +490,31 @@ def load_catalog(game_repo: Path) -> dict[str, Any]:
     operator_catalog = json.loads(operator_path.read_text(encoding="utf-8"))
     maps: dict[str, dict[str, Any]] = {}
     for image in manifest.get("images", []):
-        if not image.get("ai_output_file"):
+        if image.get("selector_enabled") is False or not (image.get("ai_output_file") or image.get("output_file")):
             continue
+        wide = image.get("wide_crop_box")
+        square = image.get("square_crop_box")
+        if (
+            isinstance(wide, list) and len(wide) == 4
+            and isinstance(square, list) and len(square) == 4
+            and wide[2] != wide[0] and wide[3] != wide[1]
+        ):
+            coordinate_frame = {
+                "x": (square[0] - wide[0]) / (wide[2] - wide[0]),
+                "y": (square[1] - wide[1]) / (wide[3] - wide[1]),
+                "width": (square[2] - square[0]) / (wide[2] - wide[0]),
+                "height": (square[3] - square[1]) / (wide[3] - wide[1]),
+            }
+        else:
+            coordinate_frame = {"x": 0, "y": 0, "width": 1, "height": 1}
         slug = image["map_slug"]
         target = maps.setdefault(slug, {"slug": slug, "name": MAP_NAMES.get(slug, slug.replace("-", " ").title()), "floors": []})
         target["floors"].append(
             {
                 "key": image["floor_key"],
                 "label": floor_label(image["floor_key"]),
-                "imageUrl": f"/game-assets/maps/{image['ai_output_file']}",
+                "imageUrl": f"/game-assets/maps/{image.get('ai_output_file') or image['output_file']}",
+                "coordinateFrame": coordinate_frame,
             }
         )
     floor_order = {"tunnel": -2, "basement": -1, "1f": 1, "2f": 2, "3f": 3, "big-tower-t3": 4}
@@ -502,19 +525,28 @@ def load_catalog(game_repo: Path) -> dict[str, Any]:
                 int("".join(character for character in floor["key"] if character.isdigit()) or 99),
             )
         )
+    operators = []
+    for operator in operator_catalog.get("operators", []):
+        item = dict(operator)
+        svg_path = str(item.get("svgPath") or "").removeprefix("assets/")
+        png_path = str(item.get("pngPath") or "").removeprefix("assets/")
+        item["iconUrl"] = f"/game-assets/{svg_path}" if svg_path else ""
+        item["portraitUrl"] = f"/game-assets/{png_path}" if png_path else ""
+        operators.append(item)
+
     return {
         "assetVersion": str(manifest.get("settings", {}).get("refreshedAt") or manifest_path.stat().st_mtime_ns),
         "maps": sorted(maps.values(), key=lambda item: item["name"]),
-        "operators": operator_catalog.get("operators", []),
+        "operators": operators,
     }
 
 
 def floor_label(key: str) -> str:
-    aliases = {"basement": "Basement", "tunnel": "Tunnel", "1f": "Floor 1", "2f": "Floor 2", "3f": "Floor 3"}
+    aliases = {"basement": "B", "tunnel": "T", "big-tower-t3": "3F", "1f": "1F", "2f": "2F", "3f": "3F"}
     if key in aliases:
         return aliases[key]
     if key.startswith("floor-") and key[6:].isdigit():
-        return f"Floor {int(key[6:])}"
+        return f"{int(key[6:])}F"
     return key.replace("-", " ").title()
 
 
@@ -662,6 +694,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(error)}, 404)
         except (ValueError, json.JSONDecodeError) as error:
             self._json({"error": str(error)}, 400)
+        except Exception as error:
+            self._json({"error": str(error)}, 500)
+
+    def do_DELETE(self) -> None:
+        path = urlparse(self.path).path
+        try:
+            if not path.startswith("/api/sets/"):
+                self._json({"error": "Not found"}, 404)
+                return
+            self.app.store.delete_set(path.rsplit("/", 1)[1])
+            self._json({"deleted": True})
+        except KeyError as error:
+            self._json({"error": str(error)}, 404)
         except Exception as error:
             self._json({"error": str(error)}, 500)
 

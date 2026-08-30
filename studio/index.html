@@ -3,13 +3,15 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#07090d">
     <title>R6 Soundle Studio</title>
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/styles.css?v=20260823-10">
   </head>
   <body>
     <header class="topbar">
-      <div>
-        <p class="eyebrow">R6 SOUNDLE</p>
+      <div class="brand-lockup">
+        <img class="brand-logo" src="/game-assets/branding/r6-logo.png" alt="R6 Soundle">
+        <span class="brand-divider" aria-hidden="true"></span>
         <h1>Studio</h1>
       </div>
       <div class="status" id="status">Connecting…</div>
@@ -37,57 +39,88 @@
         </div>
 
         <div id="editor" hidden>
-          <div class="editor-head">
-            <label class="title-field">
-              <span>Set name</span>
-              <input id="setName" placeholder="Clubhouse roaming set">
-            </label>
-            <label>
-              <span>Map</span>
-              <select id="mapSelect"></select>
-            </label>
-            <div class="editor-actions">
-              <button id="saveSet">Save draft</button>
-              <button class="primary" id="approveSet">Approve set</button>
+          <div class="editor-commandbar">
+            <div class="round-tabs" id="roundTabs"></div>
+            <div class="editor-head">
+              <label class="title-field">
+                <span>Set name</span>
+                <input id="setName" placeholder="Clubhouse roaming set">
+              </label>
+              <label>
+                <span>Map</span>
+                <select id="mapSelect"></select>
+              </label>
+              <div class="editor-actions">
+                <button class="danger-button" id="deleteSet">Delete set</button>
+                <button class="primary" id="approveSet">Approve set</button>
+              </div>
             </div>
           </div>
-
-          <div class="round-tabs" id="roundTabs"></div>
 
           <div class="editor-grid">
             <div class="map-card">
               <div class="map-toolbar">
-                <label><span>Floor</span><select id="floorSelect"></select></label>
+                <div class="floor-tabs" id="floorPicker" role="tablist" aria-label="Map floors"></div>
                 <div class="marker-tools" id="markerTools">
                   <button data-tool="listenerPos" class="active"><i class="listener"></i>Listener</button>
-                  <button data-tool="operatorStartPos"><i class="start"></i>Runner start</button>
-                  <button data-tool="targetPos"><i class="target"></i>Target</button>
+                  <button data-tool="listenerAngle"><i class="direction"></i>Direction</button>
+                  <button data-tool="operatorStartPos"><i class="start"></i>Runner Start</button>
+                  <button data-tool="targetPos"><i class="target"></i>Runner End</button>
                 </div>
               </div>
               <div class="map-stage" id="mapStage">
                 <img id="mapImage" alt="Selected floor blueprint">
-                <canvas id="mapCanvas"></canvas>
+                <canvas id="mapCanvas" tabindex="0" role="application" aria-label="Floor plan editor. Click to place the selected marker, drag markers to move them, drag the map to pan, and use the mouse wheel, plus and minus keys, or two fingers to zoom."></canvas>
+                <div class="map-markers" id="mapMarkers" aria-hidden="true"></div>
+                <div class="map-zoom-controls" role="group" aria-label="Map zoom controls">
+                  <button class="map-zoom-control" id="mapZoomIn" type="button" aria-label="Zoom in on map" title="Zoom in [+]">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"></path></svg>
+                  </button>
+                  <button class="map-zoom-control" id="mapZoomOut" type="button" aria-label="Map is fully zoomed out" title="Zoom out [-]" disabled>
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12"></path></svg>
+                  </button>
+                </div>
               </div>
-              <p class="hint">Select a marker, then click its location. Drag a marker to refine it.</p>
+              <p class="hint">Click to place the selected marker. Drag a marker to move it, drag elsewhere to pan, and scroll to zoom. Select Direction, then drag toward the Listener’s facing direction.</p>
             </div>
 
             <div class="round-card">
               <p class="eyebrow" id="roundEyebrow">ROUND 1 OF 3</p>
               <h2 id="roundHeading">Round 1</h2>
 
-              <label><span>Target operator</span><select id="operatorSelect"></select></label>
+              <div class="operator-field">
+                <span class="field-label" id="operatorLabel">Runner operator</span>
+                <button
+                  type="button"
+                  class="operator-trigger"
+                  id="operatorTrigger"
+                  aria-labelledby="operatorLabel operatorTriggerText"
+                  aria-haspopup="listbox"
+                  aria-expanded="false"
+                >
+                  <span class="operator-trigger-empty" id="operatorTriggerVisual" aria-hidden="true">?</span>
+                  <span class="operator-trigger-copy">
+                    <strong id="operatorTriggerText">Choose an operator</strong>
+                    <small id="operatorTriggerMeta">Search all attackers and defenders</small>
+                  </span>
+                  <span class="operator-chevron" aria-hidden="true">▾</span>
+                </button>
+                <div class="operator-picker" id="operatorPicker" hidden>
+                  <label class="operator-search-label" for="operatorSearch">Search operators</label>
+                  <input id="operatorSearch" type="search" placeholder="Search by name, side, or unit" autocomplete="off">
+                  <div class="operator-list" id="operatorList" role="listbox" aria-labelledby="operatorLabel"></div>
+                </div>
+              </div>
               <label><span>Processed capture</span><select id="captureSelect"></select></label>
 
               <div class="capture-preview" id="capturePreview">
                 <div class="preview-empty">Attach an approved capture</div>
               </div>
 
-              <div class="coordinates" id="coordinates"></div>
               <button id="clearRound" class="danger-text">Clear this round</button>
             </div>
           </div>
 
-          <div class="validation" id="validation"></div>
         </div>
       </section>
     </main>
@@ -124,7 +157,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status"></div>
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="/app.js?v=20260823-10"></script>
   </body>
 </html>
-
