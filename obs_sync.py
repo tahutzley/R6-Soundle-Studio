@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 
 
 APP_NAME = "R6 Soundle OBS Sync"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 PROFILE_NAME = "R6 Soundle 1080p60"
 DEFAULT_OBS_URL = "ws://127.0.0.1:4455"
 DEFAULT_COORDINATOR_PORT = 8765
@@ -101,13 +101,12 @@ def wait_until_unix(target_unix: float) -> float:
 
 
 class WindowsGlobalHotkey:
-    """Register Ctrl+` without requiring the recorder window to have focus."""
+    """Register F7 without requiring the recorder window to have focus."""
 
     WM_HOTKEY = 0x0312
     WM_QUIT = 0x0012
-    MOD_CONTROL = 0x0002
     MOD_NOREPEAT = 0x4000
-    VK_OEM_3 = 0xC0
+    VK_F7 = 0x76
     HOTKEY_ID = 0x5236
 
     def __init__(self, callback: Callable[[], None]):
@@ -120,12 +119,12 @@ class WindowsGlobalHotkey:
 
     def start(self) -> bool:
         if os.name != "nt":
-            self.error = "global Ctrl+` is only available on Windows"
+            self.error = "global F7 is only available on Windows"
             return False
         self._thread = threading.Thread(target=self._message_loop, name="obs-sync-hotkey", daemon=True)
         self._thread.start()
         if not self._ready.wait(2.0):
-            self.error = "timed out while registering Ctrl+`"
+            self.error = "timed out while registering F7"
             return False
         return self._registered
 
@@ -136,10 +135,10 @@ class WindowsGlobalHotkey:
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self._thread_id = int(kernel32.GetCurrentThreadId())
-        modifiers = self.MOD_CONTROL | self.MOD_NOREPEAT
-        if not user32.RegisterHotKey(None, self.HOTKEY_ID, modifiers, self.VK_OEM_3):
+        modifiers = self.MOD_NOREPEAT
+        if not user32.RegisterHotKey(None, self.HOTKEY_ID, modifiers, self.VK_F7):
             error_code = ctypes.get_last_error()
-            self.error = f"Windows could not register Ctrl+` (error {error_code}); another app may be using it"
+            self.error = f"Windows could not register F7 (error {error_code}); another app may be using it"
             self._ready.set()
             return
         self._registered = True
@@ -481,7 +480,7 @@ class ObsController:
             }
             if any(video.get(key) != value for key, value in expected.items()):
                 raise SyncError(f"OBS did not retain the requested 1080p60 settings: {video}")
-            self.log(f"{action} OBS profile '{PROFILE_NAME}'; the sync recorder now owns Ctrl+`")
+            self.log(f"{action} OBS profile '{PROFILE_NAME}'; the sync recorder now owns F7")
             return video
 
     def _set_record_directory(self) -> None:
@@ -1169,7 +1168,7 @@ class SyncApp:
         ttk.Label(obs_frame, textvariable=self.obs_status_var).grid(row=4, column=1, sticky="w", pady=(6, 0))
         ttk.Label(
             obs_frame,
-            text="Ctrl+` works globally: press once to send READY, then press again while recording to STOP BOTH.",
+            text="F7 works globally: press once to send READY, then press again while recording to STOP BOTH.",
             wraplength=600,
         ).grid(row=5, column=1, sticky="w", pady=(6, 0))
 
@@ -1211,10 +1210,10 @@ class SyncApp:
         self.root.after(50, self._drain_events)
         self.root.after(50, self._tick_countdown)
         if self.hotkey.start():
-            self._queue_log("Global Ctrl+` registered: READY when idle, STOP BOTH while recording")
+            self._queue_log("Global F7 registered: READY when idle, STOP BOTH while recording")
         else:
-            self.root.bind_all("<Control-grave>", lambda _event: self.events.put(("capture_hotkey", {})))
-            self._queue_log(f"{self.hotkey.error}; Ctrl+` will work only while this window has focus")
+            self.root.bind_all("<F7>", lambda _event: self.events.put(("capture_hotkey", {})))
+            self._queue_log(f"{self.hotkey.error}; F7 will work only while this window has focus")
 
     def _labeled_entry(self, parent: Any, label: str, variable: Any, row: int, show: str | None = None) -> None:
         self.ttk.Label(parent, text=label).grid(row=row, column=0, sticky="e", padx=(0, 8), pady=3)
@@ -1347,11 +1346,11 @@ class SyncApp:
         elif self.capture_phase == "recording":
             self.stop_both()
         elif self.capture_phase == "ready":
-            self._queue_log("Ctrl+`: already READY; waiting for the other player")
+            self._queue_log("F7: already READY; waiting for the other player")
         elif self.capture_phase == "countdown":
-            self._queue_log("Ctrl+`: recording is starting; wait for RECORDING before stopping")
+            self._queue_log("F7: recording is starting; wait for RECORDING before stopping")
         else:
-            self._queue_log("Ctrl+`: STOP BOTH is already scheduled")
+            self._queue_log("F7: STOP BOTH is already scheduled")
 
     def disconnect_room(self) -> None:
         self._close_network()
@@ -1385,7 +1384,7 @@ class SyncApp:
                 elif event_type == "obs_ok":
                     self.obs_status_var.set(f"OBS: connected ({data.get('obsVersion', '?')})")
                 elif event_type == "profile_ok":
-                    self.obs_status_var.set("OBS: R6 Soundle 1080p60 profile active; recorder owns Ctrl+`")
+                    self.obs_status_var.set("OBS: R6 Soundle 1080p60 profile active; recorder owns F7")
                 elif event_type == "connected":
                     self.room_status_var.set("Room: connected")
                 elif event_type == "disconnected":

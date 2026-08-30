@@ -49,7 +49,7 @@ flat `videos` folder. No per-session capture directories or timing sidecars are
 created. Raw videos are intentionally ignored by Git. The OBS WebSocket
 password is saved locally in the ignored `config.local.json` file after use.
 
-The recorder registers `Ctrl+\`` as a global synchronized-session shortcut:
+The recorder registers `F7` as a global synchronized-session shortcut:
 press it once to send **READY**, then press it again while recording to request
 **STOP BOTH**. When both players are ready, the recorder counts down three
 seconds and starts both OBS recordings at the same synchronized boundary. The
