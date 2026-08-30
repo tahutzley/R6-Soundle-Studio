@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 
 
 APP_NAME = "R6 Soundle OBS Sync"
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 PROFILE_NAME = "R6 Soundle 1080p60"
 DEFAULT_OBS_URL = "ws://127.0.0.1:4455"
 DEFAULT_COORDINATOR_PORT = 8765
@@ -500,9 +500,15 @@ class ObsController:
         requested_at = time.time()
         self._call("StartRecord")
         acknowledged_at = time.time()
-        status = self._call("GetRecordStatus")
-        if not status.get("outputActive"):
-            raise SyncError("OBS did not enter the recording state")
+        deadline = time.perf_counter() + 3.0
+        status: dict[str, Any] = {}
+        while time.perf_counter() < deadline:
+            status = self._call("GetRecordStatus")
+            if status.get("outputActive"):
+                break
+            time.sleep(0.050)
+        else:
+            raise SyncError("OBS did not enter the recording state within 3 seconds")
         return {
             "requestedAt": requested_at,
             "acknowledgedAt": acknowledged_at,
@@ -719,7 +725,8 @@ class SyncCoordinator:
                     self._broadcast_locked({"type": "session_complete", "sessionId": completed_session})
                     self._broadcast_state_locked()
             elif message_type == "recording_stopped_early":
-                self._schedule_stop_locked(f"{client['name']} stopped OBS outside the sync tool", emergency=True)
+                reason = str(message.get("reason") or "OBS reported that recording became inactive")
+                self._schedule_stop_locked(f"{client['name']}: {reason}", emergency=True)
 
     def _maybe_schedule_start_locked(self) -> None:
         if self.session_id is not None or len(self.clients) != 2:
@@ -1023,6 +1030,7 @@ class SyncClient:
 
     def _monitor_recording(self) -> None:
         consecutive_failures = 0
+        consecutive_inactive = 0
         while self.current_session and not self._closing.wait(0.5):
             if self.stop_scheduled:
                 return
@@ -1034,13 +1042,19 @@ class SyncClient:
                 if consecutive_failures < 3:
                     continue
                 return
-            if not active:
-                self.log("OBS was stopped outside the sync tool; sending an emergency stop")
-                try:
-                    self._send({"type": "recording_stopped_early"})
-                except Exception:
-                    pass
-                return
+            if active:
+                consecutive_inactive = 0
+                continue
+            consecutive_inactive += 1
+            if consecutive_inactive < 3:
+                continue
+            reason = "OBS reported recording inactive for three consecutive checks"
+            self.log(f"{reason}; sending an emergency stop")
+            try:
+                self._send({"type": "recording_stopped_early", "reason": reason})
+            except Exception:
+                pass
+            return
 
     def _write_sidecar(self) -> None:
         if not self.current_session:
@@ -1639,6 +1653,28 @@ def self_test() -> None:
         assert fake_profile.parameters[("Hotkeys", "OBSBasic.StartRecording")] == NO_HOTKEY_BINDINGS
         assert fake_profile.parameters[("Hotkeys", "OBSBasic.StopRecording")] == NO_HOTKEY_BINDINGS
     print("PASS: standardized OBS profile is 1080p60 Hybrid MP4 without conflicting OBS hotkeys")
+
+    class FakeDelayedStartController(ObsController):
+        def __init__(self) -> None:
+            super().__init__("ws://unused", "", captured.append)
+            self.status_checks = 0
+
+        def _call(self, request_type: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+            if request_type == "StartRecord":
+                return {}
+            if request_type == "GetRecordStatus":
+                self.status_checks += 1
+                return {
+                    "outputActive": self.status_checks >= 3,
+                    "outputDuration": 0,
+                }
+            raise AssertionError(f"Unexpected delayed-start request: {request_type}")
+
+    delayed_start = FakeDelayedStartController()
+    delayed_result = delayed_start.start_recording()
+    assert delayed_start.status_checks == 3
+    assert delayed_result["obsDurationMs"] == 0
+    print("PASS: OBS startup verification tolerates delayed outputActive state")
 
     class FakeTimingController:
         def __init__(self, capture_directory: Path):
