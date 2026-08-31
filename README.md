@@ -32,7 +32,8 @@ python studio_server.py --game-repo D:\Projects\R6-Soundle
 
 The game checkout supplies the current map manifest, blueprint images, and
 operator catalog while the authoring bundle is being separated. Studio data is
-stored in `studio.db`; processed media is stored under `media\processed`.
+stored in `studio.db`; newly processed capture media is organized under
+`daily sets`.
 
 ## Capture with OBS
 
@@ -59,27 +60,56 @@ this key so one keypress cannot start and immediately stop a local recording.
 To use another storage drive, pass `--capture-directory D:\captures` or set
 `R6_SOUNDLE_CAPTURE_DIR` before launching the recorder.
 
-## Process a two-POV capture
+## Process named two-POV captures
 
 Install FFmpeg and ensure `ffmpeg` and `ffprobe` are on `PATH`, then run:
 
 ```powershell
-python processor\process_capture.py `
-  --listener path\listener.mp4 `
-  --runner path\runner.mp4 `
-  --capture-id capture-name
+python processor\process_capture.py
 ```
 
-The processor estimates the offset from the audio envelopes unless
-`--offset-ms` is supplied. It writes:
+With no input arguments, the processor finds MP4s and ZIP archives under the
+Studio `videos` directory. It reads ZIP metadata to build the complete queue,
+then extracts only one runner/listener pair at a time while processing.
+
+Use `--input` to instead supply any combination of ZIP archives, MP4 files, and
+directories. Directories are searched recursively. Every MP4 must use this
+naming format:
+
+```text
+<mapset-number>-<map>-<slot>-<listener|runner>.mp4
+```
+
+For example, `1-clubhouse-3-listener.mp4` and
+`1-clubhouse-3-runner.mp4` are one pair. Before processing starts, the command
+checks that every key has exactly one listener and one runner. The processor
+then estimates each pair's offset from its audio envelopes unless `--offset-ms`
+is supplied.
+
+To check the complete queue without running FFmpeg:
+
+```powershell
+python processor\process_capture.py --validate-only
+```
+
+Each pair writes exactly three files. The example above is written to
+`daily sets\1-clubhouse\3`:
 
 - `listener.jpg` — a single frame at the start of the aligned listener POV;
 - `listener.m4a` — the listener audio used by the game;
-- `replay.mp4` — the aligned runner POV with listener audio;
-- `capture.json` — durations, offset, confidence, hashes, and source paths.
+- `replay.mp4` — the aligned runner POV with listener audio.
+
+To process one explicitly selected pair, use:
+
+```powershell
+python processor\process_capture.py `
+  --listener path\1-clubhouse-3-listener.mp4 `
+  --runner path\1-clubhouse-3-runner.mp4
+```
 
 Raw inputs are preserved by default. After reviewing all outputs, pass
-`--remove-raw` to remove the two source recordings.
+`--remove-raw` to remove ordinary source MP4s. Recordings inside ZIP archives
+cannot be removed by the processor.
 
 ## Run checks
 

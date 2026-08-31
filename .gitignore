@@ -4,5 +4,6 @@ __pycache__/
 studio.db
 media/raw/
 media/processed/
+daily sets/
 videos/
 config.local.json*
