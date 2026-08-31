@@ -1,0 +1,44 @@
+name: Repository security
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Guard private paths
+        run: python -m unittest tests.test_repository_safety -v
+      - name: Scan current tree
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo
+          ghcr.io/gitleaks/gitleaks:v8.29.0@sha256:29c8a0572eae6d8ce620db1a4599663d43b06b0a8f90e42ded2ad5f63ac57f71
+          dir . --no-banner --redact
+      - name: Scan pushed commit range
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]]; then
+            RANGE="$BASE_SHA..$HEAD_SHA"
+          else
+            RANGE="-1 $HEAD_SHA"
+          fi
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/repo \
+            ghcr.io/gitleaks/gitleaks:v8.29.0@sha256:29c8a0572eae6d8ce620db1a4599663d43b06b0a8f90e42ded2ad5f63ac57f71 \
+            git . --no-banner --redact --log-opts="$RANGE"

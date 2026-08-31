@@ -1,0 +1,16 @@
+title = "R6 Soundle Studio secret scanning"
+minVersion = "8.29.0"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Exact local-state paths that repository tests forbid Git from tracking."
+paths = [
+  '''^\.env$''',
+  '''^config\.local\.json[^\\/]*$''',
+  '''^studio\.db(?:-[^\\/]*)?$''',
+  '''^daily sets[\\/]''',
+  '''^videos[\\/]''',
+  '''^media[\\/](?:raw|processed)[\\/]''',
+]

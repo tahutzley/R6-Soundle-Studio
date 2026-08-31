@@ -116,7 +116,13 @@ cannot be removed by the processor.
 ```powershell
 python -m unittest discover -s tests -v
 python processor\process_capture.py --self-test
+gitleaks dir . --no-banner --redact
 ```
+
+The secret scan excludes only the exact ignored local database, recorder
+configuration, raw video, and generated-media paths. The repository safety
+test separately prevents those paths from entering Git, while CI scans both
+the current tree and each pushed commit range.
 
 ## Next milestones
 
