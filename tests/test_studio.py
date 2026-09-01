@@ -46,9 +46,9 @@ class StudioStoreTests(unittest.TestCase):
         self.assertEqual([1, 2, 3], [round_item["position"] for round_item in item["rounds"]])
         self.assertNotIn("difficulty", item["rounds"][0])
 
-    def test_phase5_publish_fields_are_additive_and_inert(self) -> None:
+    def test_phase6_publish_fields_are_additive_and_inert(self) -> None:
         with self.store.connect() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -66,6 +66,15 @@ class StudioStoreTests(unittest.TestCase):
                     "remote_release_version_id",
                     "publisher_idempotency_key",
                 }.issubset(published_columns)
+            )
+            publish_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(publish_attempts)")
+            }
+            self.assertTrue(
+                {"remote_publish_attempt_id", "request_json", "objects_json", "completed_at"}.issubset(
+                    publish_columns
+                )
             )
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM publish_attempts").fetchone()[0],
@@ -103,7 +112,7 @@ class StudioStoreTests(unittest.TestCase):
             self.assertEqual(row["set_id"], "set-1")
             self.assertEqual(row["set_version"], 2)
             self.assertIsNone(row["remote_release_id"])
-            self.assertEqual(migrated_connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(migrated_connection.execute("PRAGMA user_version").fetchone()[0], 4)
 
     def test_set_can_be_deleted(self) -> None:
         item = self.store.save_set({"name": "Disposable", "mapSlug": "bank", "rounds": []})

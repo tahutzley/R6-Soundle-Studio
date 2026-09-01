@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r6soundle.example/contracts/publish-v1.schema.json",
+  "title": "R6 Soundle publish prepare request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "releaseDate", "authoringSetId", "studioSetVersion", "schemaVersion",
+    "scoringVersion", "mapAssetVersion", "snapshot", "media"
+  ],
+  "dependentRequired": {
+    "expectedRevision": ["reason"],
+    "reason": ["expectedRevision"]
+  },
+  "properties": {
+    "releaseDate": { "type": "string", "format": "date" },
+    "authoringSetId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "studioSetVersion": { "type": "integer", "minimum": 1 },
+    "schemaVersion": { "const": 1 },
+    "scoringVersion": { "type": "integer", "minimum": 1 },
+    "mapAssetVersion": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "snapshot": {
+      "type": "object",
+      "required": ["puzzle"],
+      "properties": {
+        "puzzle": {
+          "type": "object",
+          "required": ["date", "mapName", "mapSlug", "floors", "rounds"],
+          "properties": {
+            "date": { "type": "string", "format": "date" },
+            "mapName": { "type": "string", "minLength": 1 },
+            "mapSlug": { "type": "string", "minLength": 1 },
+            "floors": { "type": "array", "minItems": 1 },
+            "rounds": { "type": "array", "minItems": 3, "maxItems": 3 }
+          }
+        }
+      }
+    },
+    "media": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["position", "kind", "sha256", "byteSize", "mimeType"],
+        "properties": {
+          "position": { "type": "integer", "minimum": 1, "maximum": 3 },
+          "kind": { "enum": ["listener_still", "listener_audio", "replay_video"] },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "byteSize": { "type": "integer", "minimum": 1 },
+          "mimeType": { "enum": ["image/jpeg", "audio/mp4", "video/mp4"] }
+        }
+      }
+    },
+    "expectedRevision": { "type": "integer", "minimum": 1 },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 500 }
+  }
+}

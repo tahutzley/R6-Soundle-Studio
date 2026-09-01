@@ -5,6 +5,8 @@ const state = {
   sets: [],
   captures: [],
   schedule: [],
+  publishAttempts: [],
+  publisher: { configured: false },
   current: null,
   roundIndex: 0,
   floorKey: "",
@@ -780,8 +782,9 @@ function updateListenerAngle(event) {
 }
 
 async function refreshData() {
-  [state.sets, state.captures, state.schedule] = await Promise.all([
+  [state.sets, state.captures, state.schedule, state.publishAttempts, state.publisher] = await Promise.all([
     api("/api/sets"), api("/api/captures"), api("/api/schedule"),
+    api("/api/publish-attempts"), api("/api/publisher/status"),
   ]);
   if (state.current) state.current = state.sets.find((item) => item.id === state.current.id) || null;
   renderEditor();
@@ -941,12 +944,21 @@ function renderSchedule() {
   const approved = state.sets.filter((item) => item.status === "approved");
   $("#scheduleSet").innerHTML = approved.length ? approved.map((item) =>
     `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("") : `<option value="">No approved sets</option>`;
-  $("#scheduleList").innerHTML = state.schedule.length ? state.schedule.map((item) => `
+  $("#scheduleSetButton").textContent = state.publisher.configured ? "Upload & schedule" : "Schedule locally";
+  const attempts = new Map(state.publishAttempts.map((item) => [item.release_date, item]));
+  const scheduled = new Map(state.schedule.map((item) => [item.release_date, item]));
+  const dates = [...new Set([...scheduled.keys(), ...attempts.keys()])].sort();
+  $("#scheduleList").innerHTML = dates.length ? dates.map((releaseDate) => {
+    const item = scheduled.get(releaseDate);
+    const attempt = attempts.get(releaseDate);
+    const setItem = state.sets.find((value) => value.id === (item?.set_id || attempt?.set_id));
+    return `
     <div class="schedule-item">
-      <strong>${escapeHtml(item.release_date)}</strong>
-      <div>${escapeHtml(item.set_name)}</div>
-      <span class="pill">midnight ET</span>
-    </div>`).join("") : `<p class="hint">Nothing scheduled.</p>`;
+      <strong>${escapeHtml(releaseDate)}</strong>
+      <div>${escapeHtml(item?.set_name || setItem?.name || "Publish attempt")}${attempt?.error_summary ? `<small>${escapeHtml(attempt.error_summary)}</small>` : ""}</div>
+      <span class="pill ${escapeHtml(attempt?.state || "")}">${escapeHtml(attempt?.state || "midnight ET")}</span>
+    </div>`;
+  }).join("") : `<p class="hint">Nothing scheduled.</p>`;
 }
 
 $("#newSet").addEventListener("click", () => createSet().catch((error) => toast(error.message)));
@@ -1308,9 +1320,10 @@ $("#importCapture").addEventListener("click", async () => {
 });
 $("#scheduleSetButton").addEventListener("click", async () => {
   try {
-    await api("/api/schedule", { method: "POST", body: JSON.stringify({ releaseDate: $("#releaseDate").value, setId: $("#scheduleSet").value }) });
+    const endpoint = state.publisher.configured ? "/api/publish" : "/api/schedule";
+    await api(endpoint, { method: "POST", body: JSON.stringify({ releaseDate: $("#releaseDate").value, setId: $("#scheduleSet").value }) });
     await refreshData();
-    toast("Set scheduled for midnight ET");
+    toast(state.publisher.configured ? "Nine media objects verified; release scheduled" : "Set scheduled locally for midnight ET");
   } catch (error) { toast(error.message); }
 });
 $("#mapImage").addEventListener("load", resizeCanvas);

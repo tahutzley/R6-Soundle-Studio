@@ -186,10 +186,10 @@ trusted telemetry contract exists.
 Existing Studio databases migrate additively on startup. Capture rows gain a
 content fingerprint, schema/processing versions, map-set/slot identity, and an
 import-source label; existing rows and local owner state are preserved.
-Phase 5 also adds inert local publish-attempt and remote release-ID fields so a
-later resumable publisher can record progress without putting database or
-object-store credentials in Studio. Drafts and captures remain SQLite-only
-owner state and are never imported automatically into production.
+Phase 5 added inert publish-attempt fields; Phase 6 now uses an additive SQLite
+migration to persist the immutable request, remote attempt/release IDs,
+per-object progress, retries, errors, and completion. Drafts and captures remain
+SQLite-only owner state and are never imported automatically into production.
 
 ## Preview a draft in the real game
 
@@ -212,7 +212,35 @@ metadata; the preview bridge test rejects unreviewed drift.
 
 Studio also vendors the game-owned `release-v1` schema and provenance metadata.
 Phase 4 establishes that compatibility boundary; the remote publisher does not
-use it until the later resumable-publishing phase.
+use unsupported contract versions.
+
+## Upload and schedule a release
+
+Start the Phase 6 game service on loopback with its local-only admin simulation,
+then point Studio at it:
+
+```powershell
+$env:R6_STUDIO_PUBLISHER_URL = "http://127.0.0.1:4190"
+python studio_server.py
+```
+
+Choose an approved set and date in **Release calendar**, then select **Upload &
+schedule**. Studio rechecks all capture sizes and SHA-256 values, negotiates the
+publisher capability contract, uploads exactly the pending still/audio/replay
+objects for all three rounds, asks the server to HEAD-verify size/hash/MIME, and
+finalizes only after all nine objects pass. Closing or restarting Studio is
+safe: the next action resumes the persisted remote attempt with fresh short
+upload authorizations. A stale map-asset version blocks publish until the set is
+reviewed and approved again.
+
+The future Phase 7 publisher bearer credential is read only from
+`R6_STUDIO_PUBLISHER_TOKEN`; it is never written to `studio.db`, browser state,
+logs, or an object-store request. Do not expose the unauthenticated Phase 6
+simulation outside loopback.
+
+The game owns `contracts/publish-v1.schema.json`; Studio vendors the schema and
+source hash under `schemas/`. The publisher capability response must advertise
+v1 before Studio creates or resumes an attempt.
 
 ## Run checks
 
@@ -221,6 +249,7 @@ python -m unittest discover -s tests -v
 python -m unittest tests.test_preview_bridge -v
 python -m unittest tests.test_studio tests.test_daily_set_import -v
 python -m unittest tests.test_process_capture tests.test_capture_contract -v
+python -m unittest tests.test_publish_client -v
 python studio_server.py --self-test
 python processor\process_capture.py --self-test
 python processor\index_captures.py --root tests\fixtures\legacy-daily-sets --dry-run
@@ -234,6 +263,7 @@ the current tree and each pushed commit range.
 
 ## Next milestones
 
-The local data model and media contract are intentionally ready for a hosted
-room service. Next work is the signed room-code relay, resumable uploads, and a
-single-file Windows recorder build so recording helpers do not need this repo.
+The local data model and media contract now support resumable release publishing.
+Next work includes authenticated publisher access, the signed room-code relay,
+and a single-file Windows recorder build so recording helpers do not need this
+repo.

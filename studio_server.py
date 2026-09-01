@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import mimetypes
+import os
 import secrets
 import sqlite3
 import sys
@@ -31,6 +32,7 @@ from studio_import import (
     ScanChangedError,
     capture_content_fingerprint,
 )
+from studio_publish import PublishClientError, PublisherClient, StudioPublisher
 
 
 ROOT = Path(__file__).resolve().parent
@@ -123,6 +125,11 @@ CREATE TABLE IF NOT EXISTS publish_attempts (
     retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
     remote_release_id TEXT,
     remote_release_version_id TEXT,
+    remote_publish_attempt_id TEXT,
+    request_json TEXT,
+    objects_json TEXT NOT NULL DEFAULT '[]',
+    last_response_json TEXT,
+    completed_at TEXT,
     error_summary TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -276,7 +283,25 @@ class Store:
                ON published_releases(remote_release_version_id)
                WHERE remote_release_version_id IS NOT NULL"""
         )
-        connection.execute("PRAGMA user_version = 3")
+        publish_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(publish_attempts)")
+        }
+        publish_additions = {
+            "remote_publish_attempt_id": "TEXT",
+            "request_json": "TEXT",
+            "objects_json": "TEXT NOT NULL DEFAULT '[]'",
+            "last_response_json": "TEXT",
+            "completed_at": "TEXT",
+        }
+        for name, declaration in publish_additions.items():
+            if name not in publish_columns:
+                connection.execute(f"ALTER TABLE publish_attempts ADD COLUMN {name} {declaration}")
+        connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS publish_attempts_remote_unique
+               ON publish_attempts(remote_publish_attempt_id)
+               WHERE remote_publish_attempt_id IS NOT NULL"""
+        )
+        connection.execute("PRAGMA user_version = 4")
 
     @contextmanager
     def connect(self):
@@ -321,6 +346,7 @@ class Store:
             "replay": {"videoPath": row["replay_video_path"]},
             "alignment": manifest.get("alignment", {}),
             "durationSeconds": manifest.get("durationSeconds"),
+            "media": manifest.get("media", []),
             "source": source,
             "contentFingerprint": row["content_fingerprint"],
             "schemaVersion": row["schema_version"],
@@ -596,6 +622,8 @@ def load_catalog(game_repo: Path) -> dict[str, Any]:
                 "label": floor_label(image["floor_key"]),
                 "imageUrl": f"/game-assets/maps/{image.get('ai_output_file') or image['output_file']}",
                 "coordinateFrame": coordinate_frame,
+                "pixelsPerMeter": float(image.get("pixels_per_meter") or 1),
+                "coordinateSize": float(image.get("coordinate_size") or 2048),
             }
         )
     floor_order = {"tunnel": -2, "basement": -1, "1f": 1, "2f": 2, "3f": 3, "big-tower-t3": 4}
@@ -798,6 +826,7 @@ class App:
     store: Store
     game_repo: Path
     import_roots: tuple[Path, ...]
+    publisher: StudioPublisher | None = None
 
     def __post_init__(self) -> None:
         self.import_roots = tuple(root.expanduser().resolve() for root in self.import_roots)
@@ -955,6 +984,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.app.store.list_captures())
             elif path == "/api/schedule":
                 self._json(self.app.store.list_schedule())
+            elif path == "/api/publisher/status":
+                self._json({"configured": self.app.publisher is not None})
+            elif path == "/api/publish-attempts":
+                self._json(self.app.publisher.list_attempts() if self.app.publisher else [])
             elif path.startswith("/api/puzzles/"):
                 item = self.app.store.public_puzzle(path.rsplit("/", 1)[1])
                 self._json(item or {"error": "Puzzle is not released"}, 200 if item else 404)
@@ -1024,6 +1057,14 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/schedule":
                 self._json(self.app.store.schedule(str(payload["releaseDate"]), str(payload["setId"])), 201)
+            elif path == "/api/publish":
+                if not self.app.publisher:
+                    self._json({"error": "Remote publisher is not configured"}, 409)
+                    return
+                self._json(
+                    self.app.publisher.publish(str(payload["releaseDate"]), str(payload["setId"])),
+                    201,
+                )
             elif path == "/api/releases/publish-due":
                 self._json({"published": self.app.store.publish_due()})
             else:
@@ -1034,6 +1075,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(error), "state": "retry"}, 409)
         except DailySetImportError as error:
             self._json({"error": str(error)}, 400)
+        except PublishClientError as error:
+            self._json({"error": str(error)}, 502)
         except (ValueError, json.JSONDecodeError) as error:
             self._json({"error": str(error)}, 400)
         except Exception as error:
@@ -1083,12 +1126,26 @@ def run_server(args: argparse.Namespace) -> None:
     import_roots = tuple(
         path.resolve() for path in (args.import_root or [ROOT / "daily sets"])
     )
-    app = App(Store(args.db.resolve()), game_repo, import_roots)
+    store = Store(args.db.resolve())
+    publisher_url = args.publisher_url or os.getenv("R6_STUDIO_PUBLISHER_URL", "").strip() or None
+    publisher_token = os.getenv("R6_STUDIO_PUBLISHER_TOKEN", "").strip() or None
+    publisher = None
+    if publisher_url:
+        catalog = load_catalog(game_repo)
+        scoring = json.loads((game_repo / "assets" / "data" / "scoring.json").read_text(encoding="utf-8"))
+        publisher = StudioPublisher(
+            store,
+            catalog,
+            int(scoring["version"]),
+            PublisherClient(publisher_url, publisher_token),
+        )
+    app = App(store, game_repo, import_roots, publisher)
     server = Server((args.host, args.port), app)
     url = f"http://{args.host}:{server.server_port}/"
     print(f"R6 Soundle Studio: {url}")
     print(f"Database: {app.store.db_path}")
     print(f"Game authoring assets: {game_repo}")
+    print(f"Remote publisher: {publisher_url or 'not configured'}")
     if not args.no_browser:
         Timer(0.4, lambda: webbrowser.open(url)).start()
     try:
@@ -1109,6 +1166,10 @@ def parser() -> argparse.ArgumentParser:
         "--import-root", type=Path, action="append",
         help="Allowed processed-media root; may be repeated (default: Studio daily sets)",
     )
+    result.add_argument(
+        "--publisher-url",
+        help="Production-service base URL; credential is read only from R6_STUDIO_PUBLISHER_TOKEN",
+    )
     result.add_argument("--no-browser", action="store_true")
     result.add_argument("--self-test", action="store_true")
     return result
@@ -1125,6 +1186,11 @@ def self_test() -> int:
             }
             if not required.issubset(columns):
                 raise RuntimeError("Phase 2 capture migration is incomplete")
+            publish_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(publish_attempts)")
+            }
+            if not {"remote_publish_attempt_id", "request_json", "objects_json", "completed_at"}.issubset(publish_columns):
+                raise RuntimeError("Phase 6 publish migration is incomplete")
     print("Studio self-test passed: schema migration and transaction setup are ready.")
     return 0
 

@@ -87,6 +87,8 @@ h2 { margin-bottom: 0; font-size: 1.22rem; line-height: 1.05; }
 .pill { color: var(--muted); font-size: .65rem; letter-spacing: .1em; text-transform: uppercase; }
 .pill.approved { color: var(--green); }
 .pill.scheduled { color: var(--blue); }
+.pill.uploading { color: var(--blue); }
+.pill.upload_failed { color: var(--danger); }
 .sidebar-footer { display: grid; gap: 7px; margin-top: auto; }
 .sidebar-footer button { border-radius: 0; background: transparent; }
 .editor { min-width: 0; min-height: 0; padding: 12px 14px; overflow: hidden; background: var(--bg); }
