@@ -233,10 +233,10 @@ safe: the next action resumes the persisted remote attempt with fresh short
 upload authorizations. A stale map-asset version blocks publish until the set is
 reviewed and approved again.
 
-The future Phase 7 publisher bearer credential is read only from
+The Phase 7 publisher bearer credential is required and read only from
 `R6_STUDIO_PUBLISHER_TOKEN`; it is never written to `studio.db`, browser state,
-logs, or an object-store request. Do not expose the unauthenticated Phase 6
-simulation outside loopback.
+logs, or an object-store request. Do not disable the Phase 7 bearer check or
+expose local simulation outside loopback.
 
 The game owns `contracts/publish-v1.schema.json`; Studio vendors the schema and
 source hash under `schemas/`. The publisher capability response must advertise
@@ -263,7 +263,7 @@ the current tree and each pushed commit range.
 
 ## Next milestones
 
-The local data model and media contract now support resumable release publishing.
-Next work includes authenticated publisher access, the signed room-code relay,
-and a single-file Windows recorder build so recording helpers do not need this
-repo.
+The local data model and media contract now support authenticated resumable
+release publishing. Next work includes the public game's Phase 8 API cutover,
+the signed room-code relay, and a single-file Windows recorder build so
+recording helpers do not need this repo.

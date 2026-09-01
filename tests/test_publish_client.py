@@ -21,12 +21,13 @@ from server.app import create_app
 from server.config import Settings
 from server.repositories import InMemoryRepository
 from server.storage_filesystem import FilesystemStorage
-from studio_publish import PublishInterrupted, StudioPublisher
+from studio_publish import PublishInterrupted, PublisherClient, StudioPublisher
 from studio_server import Store
 from tests.capture_fixtures import write_capture
 
 
 UTC = timezone.utc
+PUBLISHER_TOKEN = "studio-phase7-test-token"
 
 
 class InProcessPublisherClient:
@@ -75,6 +76,14 @@ class InProcessPublisherClient:
 
 
 class StudioPublishClientTests(unittest.TestCase):
+    def test_remote_client_requires_bearer_and_https_outside_loopback(self) -> None:
+        with self.assertRaisesRegex(ValueError, "TOKEN"):
+            PublisherClient("http://127.0.0.1:4190")
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            PublisherClient("http://publisher.example.invalid", "test-publisher-token-value")
+        client = PublisherClient("https://publisher.example.invalid", "test-publisher-token-value")
+        self.assertEqual(client.bearer_token, "test-publisher-token-value")
+
     def test_vendored_publish_contract_matches_game_authority(self) -> None:
         authority = json.loads((GAME_ROOT / "contracts" / "publish-v1.schema.json").read_text(encoding="utf-8"))
         vendored = json.loads((STUDIO_ROOT / "schemas" / "game-publish-v1.schema.json").read_text(encoding="utf-8"))
@@ -136,12 +145,18 @@ class StudioPublishClientTests(unittest.TestCase):
             now = datetime(2026, 9, 1, 12, tzinfo=UTC)
             storage = FilesystemStorage(root / "remote-objects", b"i" * 32)
             game = create_app(
-                settings=Settings(environment="test", admin_api_enabled=True),
+                settings=Settings(
+                    environment="test",
+                    admin_api_enabled=True,
+                    local_publisher_token=PUBLISHER_TOKEN,
+                ),
                 repository=InMemoryRepository(),
                 storage=storage,
                 clock=lambda: now,
             )
-            client = InProcessPublisherClient(TestClient(game))
+            client = InProcessPublisherClient(
+                TestClient(game, headers={"Authorization": f"Bearer {PUBLISHER_TOKEN}"})
+            )
             publisher = StudioPublisher(store, catalog, 5, client)
             with self.assertRaises(PublishInterrupted):
                 publisher.publish("2026-09-02", approved["id"], interrupt_after=interrupt_after)

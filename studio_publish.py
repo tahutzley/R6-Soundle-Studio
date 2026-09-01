@@ -9,7 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -41,6 +41,13 @@ class PublisherClient:
     def __init__(self, base_url: str, bearer_token: str | None = None, timeout_seconds: int = 60) -> None:
         if not base_url.startswith(("http://", "https://")):
             raise ValueError("Publisher URL must be absolute HTTP(S)")
+        parsed = urlsplit(base_url)
+        if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("Non-loopback publisher URLs must use HTTPS")
+        if not bearer_token:
+            raise ValueError("R6_STUDIO_PUBLISHER_TOKEN is required for remote publishing")
+        if not 20 <= len(bearer_token) <= 256:
+            raise ValueError("R6_STUDIO_PUBLISHER_TOKEN must be between 20 and 256 characters")
         self.base_url = base_url.rstrip("/") + "/"
         self.bearer_token = bearer_token
         self.timeout_seconds = timeout_seconds
