@@ -61,7 +61,12 @@ class RepositorySafetyTests(unittest.TestCase):
                 self.assertEqual(ignored.returncode, 0, "private path is not ignored")
 
     def test_safety_automation_is_present(self) -> None:
-        for relative_path in (".gitleaks.toml", ".github/workflows/security.yml"):
+        for relative_path in (
+            ".gitleaks.toml",
+            ".github/workflows/security.yml",
+            ".github/workflows/ci.yml",
+            "requirements.lock",
+        ):
             with self.subTest(path=relative_path):
                 self.assertTrue((ROOT / relative_path).is_file())
 

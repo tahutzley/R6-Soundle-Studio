@@ -1,0 +1,2 @@
+# Fully pinned Studio runtime graph. Studio otherwise uses the Python standard library.
+tzdata==2026.3

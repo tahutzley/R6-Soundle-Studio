@@ -25,6 +25,9 @@ Unix:
 python -m pip install -r requirements.txt
 ```
 
+`requirements.lock` is the Phase 9 clean-environment authority and currently
+contains the same single, fully pinned runtime dependency.
+
 ```powershell
 scripts\run-studio.bat
 ```
@@ -261,9 +264,18 @@ configuration, raw video, and generated-media paths. The repository safety
 test separately prevents those paths from entering Git, while CI scans both
 the current tree and each pushed commit range.
 
+Phase 9 CI checks out the game contract authority as a sibling, installs both
+locked dependency graphs, runs full Studio discovery and native self-tests,
+checks the legacy fixture index, and repeats the in-process interrupted/resumed
+publisher simulation with fake identities, media, filesystem storage, and a
+non-secret test bearer token. It never opens `studio.db`, `daily sets`, `videos`,
+`media/raw`, `media/processed`, `.env`, or `config.local.json` from an owner
+workspace.
+
 ## Next milestones
 
-The local data model and media contract now support authenticated resumable
-release publishing. Next work includes the public game's Phase 8 API cutover,
-the signed room-code relay, and a single-file Windows recorder build so
-recording helpers do not need this repo.
+The local data model and media contract support authenticated resumable release
+publishing, and Phase 9 CI now exercises the Studio/game integration from clean
+sibling checkouts. The next autonomous milestone is the isolated Phase 10
+launch rehearsal; signed room-code relay and a single-file Windows recorder
+remain deferred product work.
