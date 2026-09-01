@@ -192,6 +192,23 @@ class LegacyIndexerTests(unittest.TestCase):
                 index_legacy_root(root, write_manifests=True, ffprobe="fixture", probe=fake_probe),
             )
 
+    def test_one_map_set_directory_can_be_prepared_without_touching_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            make_legacy_tree(root)
+            make_legacy_tree(root, map_set="2-bank")
+
+            self.assertEqual(
+                (3, 0),
+                index_legacy_root(
+                    root / "1-bank", write_manifests=True,
+                    ffprobe="fixture", probe=fake_probe,
+                ),
+            )
+
+            self.assertEqual(3, len(list((root / "1-bank").rglob("capture.json"))))
+            self.assertEqual([], list((root / "2-bank").rglob("capture.json")))
+
     def test_preflight_rejects_partial_extra_and_unexpected_directories(self) -> None:
         cases = ("partial", "extra", "slot")
         for case in cases:

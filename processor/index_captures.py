@@ -69,10 +69,13 @@ def scan_legacy_root(root: Path) -> list[RoundPlan]:
         raise IndexingError(f"Legacy root must be a real directory: {root}")
     plans: list[RoundPlan] = []
     seen_ids: dict[str, Path] = {}
-    entries = sorted(root.iterdir(), key=lambda item: item.name.casefold())
-    if not entries:
+    if MAPSET_NAME.fullmatch(root.name):
+        mapset_entries = [root]
+    else:
+        mapset_entries = sorted(root.iterdir(), key=lambda item: item.name.casefold())
+    if not mapset_entries:
         raise IndexingError(f"Legacy root is empty: {root}")
-    for mapset_dir in entries:
+    for mapset_dir in mapset_entries:
         if mapset_dir.is_symlink() or not mapset_dir.is_dir():
             raise IndexingError(f"Unexpected item in legacy root: {mapset_dir.name}")
         match = MAPSET_NAME.fullmatch(mapset_dir.name)

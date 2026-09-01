@@ -142,11 +142,52 @@ confirmed. The automated fixture check is safe:
 python processor\index_captures.py --root tests\fixtures\legacy-daily-sets --dry-run
 ```
 
+## Import one complete daily set
+
+Use **Import daily set** on the active set (or **Import daily set** in the
+sidebar), enter only the processed folder name such as `1-clubhouse`,
+and select **Scan three rounds**. Studio resolves it inside `daily sets`
+automatically. The active-set
+action preselects that compatible draft as the import target. The scan is
+read-only and accepts only configured import roots. It requires exactly the
+`1`, `2`, and `3` round directories; validates every version-1 manifest,
+media size/hash, duration, identity, and map slug; and reports compatible
+existing drafts before enabling import.
+
+The confirm action revalidates the scan fingerprint and commits exactly three
+capture upserts plus one new or compatible draft in a single SQLite
+transaction. An identical retry is a no-op. Captures are available immediately;
+there is no separate capture-approval step. If changed content is already attached to a
+scheduled set, Studio requires an explicit stale acknowledgment and advances
+the draft version so the old schedule cannot silently publish it.
+
+The compatibility single-manifest importer remains available for one phase and
+uses the same capture-v1 validation. Additional processed roots can be allowed
+explicitly when starting Studio:
+
+```powershell
+python studio_server.py --import-root "D:\processed-r6-soundle"
+```
+
+Import infers the set number, map, slot, processing version, and optional
+operator identity. The owner must still review media and author the fields that
+cannot be inferred safely: runner operator when absent, listener position and
+direction, runner start, and runner target. Future recorder metadata may supply
+the optional `operatorId` and `recordingSessionId` capture-v1 source fields;
+coordinates and listener direction remain explicit authoring inputs until a
+trusted telemetry contract exists.
+
+Existing Studio databases migrate additively on startup. Capture rows gain a
+content fingerprint, schema/processing versions, map-set/slot identity, and an
+import-source label; existing rows and local owner state are preserved.
+
 ## Run checks
 
 ```powershell
 python -m unittest discover -s tests -v
+python -m unittest tests.test_studio tests.test_daily_set_import -v
 python -m unittest tests.test_process_capture tests.test_capture_contract -v
+python studio_server.py --self-test
 python processor\process_capture.py --self-test
 python processor\index_captures.py --root tests\fixtures\legacy-daily-sets --dry-run
 gitleaks dir . --no-banner --redact

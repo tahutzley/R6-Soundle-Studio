@@ -11,7 +11,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from studio_server import Store, load_catalog, release_at_for_date, validate_set
+from studio_server import Store, load_catalog, position_is_valid, release_at_for_date, validate_set
+from tests.capture_fixtures import write_capture
 
 
 class StudioStoreTests(unittest.TestCase):
@@ -24,21 +25,9 @@ class StudioStoreTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def make_capture(self, capture_id: str) -> None:
-        output = self.root / capture_id
-        output.mkdir()
-        for filename in ("listener.jpg", "listener.m4a", "replay.mp4"):
-            (output / filename).write_bytes(b"test")
-        manifest = {
-            "id": capture_id,
-            "durationSeconds": 4.2,
-            "evidence": {"stillPath": "listener.jpg", "audioPath": "listener.m4a"},
-            "replay": {"videoPath": "replay.mp4"},
-            "alignment": {"runnerOffsetMs": 10, "confidence": 0.9},
-        }
-        path = output / "capture.json"
-        path.write_text(json.dumps(manifest), encoding="utf-8")
+        slot = int(capture_id.rsplit("-", 1)[1])
+        path = write_capture(self.root / "1-bank", slot)
         self.store.import_capture(path)
-        self.store.approve_capture(capture_id)
 
     def complete_round(self, position: int, capture_id: str) -> dict:
         point = {"x": 0.5, "y": 0.4, "floorKey": "1f"}
@@ -71,6 +60,30 @@ class StudioStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Round 1"):
             self.store.save_set(item, item["id"])
 
+    def test_capture_review_status_does_not_block_set_approval(self) -> None:
+        for index in range(1, 4):
+            self.make_capture(f"capture-{index}")
+        with self.store.connect() as connection:
+            connection.execute("UPDATE captures SET status = 'needs_review'")
+
+        item = self.store.save_set(
+            {
+                "name": "Legacy review set",
+                "mapSlug": "bank",
+                "rounds": [self.complete_round(index, f"1-bank/{index}") for index in range(1, 4)],
+            }
+        )
+        item["status"] = "approved"
+
+        approved = self.store.save_set(item, item["id"])
+
+        self.assertEqual("approved", approved["status"])
+
+    def test_positions_can_reach_the_full_wide_map(self) -> None:
+        self.assertTrue(position_is_valid({"x": -0.4, "y": 0.5, "floorKey": "1f"}))
+        self.assertTrue(position_is_valid({"x": 1.4, "y": 1.02, "floorKey": "1f"}))
+        self.assertFalse(position_is_valid({"x": float("nan"), "y": 0.5, "floorKey": "1f"}))
+
     def test_schedule_and_publish_immutable_snapshot(self) -> None:
         for index in range(1, 4):
             self.make_capture(f"capture-{index}")
@@ -79,7 +92,7 @@ class StudioStoreTests(unittest.TestCase):
                 "name": "Complete set",
                 "mapSlug": "bank",
                 "mapName": "Bank",
-                "rounds": [self.complete_round(index, f"capture-{index}") for index in range(1, 4)],
+                "rounds": [self.complete_round(index, f"1-bank/{index}") for index in range(1, 4)],
             }
         )
         draft["status"] = "approved"
@@ -90,9 +103,9 @@ class StudioStoreTests(unittest.TestCase):
         puzzle = self.store.public_puzzle("2020-01-02", datetime(2020, 1, 2, 6, tzinfo=timezone.utc))
         self.assertIsNotNone(puzzle)
         self.assertEqual(3, len(puzzle["rounds"]))
-        self.assertEqual("/media/capture-1/listener.jpg", puzzle["rounds"][0]["evidenceImageUrl"])
-        self.assertEqual("/media/capture-1/listener.m4a", puzzle["rounds"][0]["audioUrl"])
-        self.assertEqual("/media/capture-1/replay.mp4", puzzle["rounds"][0]["replayVideoUrl"])
+        self.assertEqual("/media/1-bank%2F1/listener.jpg", puzzle["rounds"][0]["evidenceImageUrl"])
+        self.assertEqual("/media/1-bank%2F1/listener.m4a", puzzle["rounds"][0]["audioUrl"])
+        self.assertEqual("/media/1-bank%2F1/replay.mp4", puzzle["rounds"][0]["replayVideoUrl"])
 
     def test_new_york_midnight_handles_daylight_saving(self) -> None:
         self.assertEqual("2026-01-10T05:00:00Z", release_at_for_date("2026-01-10"))

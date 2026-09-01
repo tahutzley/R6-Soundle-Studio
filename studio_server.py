@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import calendar
 import json
+import math
 import mimetypes
 import sqlite3
 import sys
+import tempfile
 import uuid
 import webbrowser
 from contextlib import contextmanager
@@ -19,7 +21,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Timer
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
+
+from processor.capture_contract import read_and_validate_capture, resolve_capture_file
+from studio_import import (
+    DailySetImportError,
+    DailySetImporter,
+    ScanChangedError,
+    capture_content_fingerprint,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -64,6 +74,12 @@ CREATE TABLE IF NOT EXISTS captures (
     evidence_audio_path TEXT NOT NULL,
     replay_video_path TEXT NOT NULL,
     manifest_json TEXT NOT NULL,
+    content_fingerprint TEXT,
+    schema_version INTEGER,
+    processing_version INTEGER,
+    map_set TEXT,
+    slot INTEGER CHECK(slot BETWEEN 1 AND 3),
+    imported_source TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -150,7 +166,7 @@ def normalize_set(payload: dict[str, Any], existing: dict[str, Any] | None = Non
             item[key] = source.get(key)
         rounds.append(item)
 
-    return {
+    item = {
         "id": existing["id"] if existing else str(payload.get("id") or slug_id("set")),
         "name": str(payload.get("name") or (existing or {}).get("name") or "Untitled set").strip(),
         "mapSlug": str(payload.get("mapSlug") or (existing or {}).get("mapSlug") or "").strip(),
@@ -160,13 +176,18 @@ def normalize_set(payload: dict[str, Any], existing: dict[str, Any] | None = Non
         "version": int((existing or {}).get("version", 0)) + 1,
         "rounds": rounds,
     }
+    for key in ("importedMapSet", "importFingerprint"):
+        value = payload.get(key, (existing or {}).get(key))
+        if value:
+            item[key] = str(value)
+    return item
 
 
 def position_is_valid(value: Any) -> bool:
     if not isinstance(value, dict) or not value.get("floorKey"):
         return False
     try:
-        return 0 <= float(value["x"]) <= 1 and 0 <= float(value["y"]) <= 1
+        return math.isfinite(float(value["x"])) and math.isfinite(float(value["y"]))
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -195,8 +216,8 @@ def validate_set(item: dict[str, Any], captures: dict[str, dict[str, Any]]) -> l
         capture_id = round_item.get("captureId")
         if not capture_id:
             errors.append(f"{prefix}: processed capture is required")
-        elif captures.get(capture_id, {}).get("status") != "approved":
-            errors.append(f"{prefix}: capture must be approved")
+        elif capture_id not in captures:
+            errors.append(f"{prefix}: processed capture was not found")
     return errors
 
 
@@ -206,6 +227,27 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            self._migrate(connection)
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(captures)")}
+        additions = {
+            "content_fingerprint": "TEXT",
+            "schema_version": "INTEGER",
+            "processing_version": "INTEGER",
+            "map_set": "TEXT",
+            "slot": "INTEGER CHECK(slot BETWEEN 1 AND 3)",
+            "imported_source": "TEXT",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE captures ADD COLUMN {name} {declaration}")
+        connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS captures_map_set_slot_unique
+               ON captures(map_set, slot) WHERE map_set IS NOT NULL AND slot IS NOT NULL"""
+        )
+        connection.execute("PRAGMA user_version = 2")
 
     @contextmanager
     def connect(self):
@@ -222,6 +264,10 @@ class Store:
             connection.close()
 
     @staticmethod
+    def now_text() -> str:
+        return iso_utc()
+
+    @staticmethod
     def _decode_set(row: sqlite3.Row) -> dict[str, Any]:
         item = json.loads(row["content_json"])
         item.update(
@@ -235,6 +281,7 @@ class Store:
     @staticmethod
     def _decode_capture(row: sqlite3.Row) -> dict[str, Any]:
         manifest = json.loads(row["manifest_json"])
+        source = manifest.get("source", {})
         return {
             "id": row["id"],
             "status": row["status"],
@@ -245,6 +292,13 @@ class Store:
             "replay": {"videoPath": row["replay_video_path"]},
             "alignment": manifest.get("alignment", {}),
             "durationSeconds": manifest.get("durationSeconds"),
+            "source": source,
+            "contentFingerprint": row["content_fingerprint"],
+            "schemaVersion": row["schema_version"],
+            "processingVersion": row["processing_version"],
+            "mapSet": row["map_set"],
+            "slot": row["slot"],
+            "importedSource": row["imported_source"],
             "createdAt": row["created_at"],
             "updatedAt": row["updated_at"],
         }
@@ -314,50 +368,47 @@ class Store:
 
     def import_capture(self, manifest_path: Path) -> dict[str, Any]:
         manifest_path = manifest_path.expanduser().resolve()
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = read_and_validate_capture(manifest_path)
         capture_id = str(manifest["id"])
         evidence = manifest["evidence"]
         replay = manifest["replay"]
-
-        def resolved(value: str) -> str:
-            candidate = Path(value)
-            if not candidate.is_absolute():
-                candidate = manifest_path.parent / candidate
-            candidate = candidate.resolve()
-            if not candidate.is_file():
-                raise ValueError(f"Capture output does not exist: {candidate}")
-            return str(candidate)
-
-        still = resolved(evidence["stillPath"])
-        audio = resolved(evidence["audioPath"])
-        video = resolved(replay["videoPath"])
+        still = str(resolve_capture_file(manifest_path.parent, evidence["stillPath"], "evidence.stillPath"))
+        audio = str(resolve_capture_file(manifest_path.parent, evidence["audioPath"], "evidence.audioPath"))
+        video = str(resolve_capture_file(manifest_path.parent, replay["videoPath"], "replay.videoPath"))
+        source = manifest["source"]
+        fingerprint = capture_content_fingerprint(manifest)
         now = iso_utc()
         with self.connect() as connection:
+            current = connection.execute("SELECT * FROM captures WHERE id=?", (capture_id,)).fetchone()
+            if current and current["content_fingerprint"] == fingerprint:
+                return self._decode_capture(current)
             connection.execute(
                 """
                 INSERT INTO captures
                     (id, status, evidence_still_path, evidence_audio_path,
-                     replay_video_path, manifest_json, created_at, updated_at)
-                VALUES (?, 'needs_review', ?, ?, ?, ?, ?, ?)
+                     replay_video_path, manifest_json, content_fingerprint,
+                     schema_version, processing_version, map_set, slot,
+                     imported_source, created_at, updated_at)
+                VALUES (?, 'available', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     evidence_still_path=excluded.evidence_still_path,
                     evidence_audio_path=excluded.evidence_audio_path,
                     replay_video_path=excluded.replay_video_path,
                     manifest_json=excluded.manifest_json,
-                    status='needs_review', updated_at=excluded.updated_at
+                    content_fingerprint=excluded.content_fingerprint,
+                    schema_version=excluded.schema_version,
+                    processing_version=excluded.processing_version,
+                    map_set=excluded.map_set, slot=excluded.slot,
+                    imported_source=excluded.imported_source,
+                    status='available', updated_at=excluded.updated_at
                 """,
-                (capture_id, still, audio, video, json.dumps(manifest), now, now),
+                (
+                    capture_id, still, audio, video, json.dumps(manifest), fingerprint,
+                    manifest["schemaVersion"], manifest["processing"]["processingVersion"],
+                    source["mapSet"], source["slot"], manifest_path.parent.name,
+                    current["created_at"] if current else now, now,
+                ),
             )
-        return self.get_capture(capture_id)  # type: ignore[return-value]
-
-    def approve_capture(self, capture_id: str) -> dict[str, Any]:
-        with self.connect() as connection:
-            cursor = connection.execute(
-                "UPDATE captures SET status='approved', updated_at=? WHERE id=?",
-                (iso_utc(), capture_id),
-            )
-            if not cursor.rowcount:
-                raise KeyError("Capture not found")
         return self.get_capture(capture_id)  # type: ignore[return-value]
 
     def schedule(self, release_date: str, set_id: str) -> dict[str, Any]:
@@ -414,12 +465,13 @@ class Store:
         rounds = []
         for source in item["rounds"]:
             capture = captures[source["captureId"]]
+            media_id = quote(capture["id"], safe="")
             rounds.append(
                 {
                     **source,
-                    "evidenceImageUrl": f"/media/{capture['id']}/listener.jpg",
-                    "audioUrl": f"/media/{capture['id']}/listener.m4a",
-                    "replayVideoUrl": f"/media/{capture['id']}/replay.mp4",
+                    "evidenceImageUrl": f"/media/{media_id}/listener.jpg",
+                    "audioUrl": f"/media/{media_id}/listener.m4a",
+                    "replayVideoUrl": f"/media/{media_id}/replay.mp4",
                 }
             )
         return {
@@ -554,6 +606,20 @@ def floor_label(key: str) -> str:
 class App:
     store: Store
     game_repo: Path
+    import_roots: tuple[Path, ...]
+
+    def __post_init__(self) -> None:
+        self.import_roots = tuple(root.expanduser().resolve() for root in self.import_roots)
+        self.importer = DailySetImporter(self.store, self.import_roots, lambda: self.catalog)
+
+    def import_single_capture(self, manifest_path: Path) -> dict[str, Any]:
+        try:
+            resolved = manifest_path.expanduser().resolve(strict=True)
+        except OSError as error:
+            raise DailySetImportError("The selected capture manifest does not exist") from error
+        if not any(root == resolved or root in resolved.parents for root in self.import_roots):
+            raise DailySetImportError("The selected manifest is outside the configured import roots")
+        return self.store.import_capture(resolved)
 
     @property
     def catalog(self) -> dict[str, Any]:
@@ -611,13 +677,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _media_path(self, relative: str) -> Path | None:
-        parts = [part for part in relative.split("/") if part]
-        if len(parts) != 2:
+        if "/" not in relative:
             return None
-        capture = self.app.store.get_capture(parts[0])
+        encoded_id, filename = relative.rsplit("/", 1)
+        capture = self.app.store.get_capture(unquote(encoded_id))
         if not capture:
             return None
-        filename = parts[1]
         mapping = {
             "listener.jpg": capture["evidence"]["stillPath"],
             "listener.m4a": capture["evidence"]["audioPath"],
@@ -665,10 +730,19 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sets":
                 self._json(self.app.store.save_set(payload), 201)
             elif path == "/api/captures/import":
-                self._json(self.app.store.import_capture(Path(str(payload.get("manifestPath", "")))), 201)
-            elif path.startswith("/api/captures/") and path.endswith("/approve"):
-                capture_id = path.split("/")[3]
-                self._json(self.app.store.approve_capture(capture_id))
+                self._json(self.app.import_single_capture(Path(str(payload.get("manifestPath", "")))), 201)
+            elif path == "/api/imports/scan":
+                self._json(self.app.importer.scan(str(payload.get("directoryPath", ""))))
+            elif path == "/api/imports/commit":
+                target = payload.get("targetSetId")
+                self._json(
+                    self.app.importer.commit(
+                        str(payload.get("scanId", "")),
+                        target_set_id=str(target) if target else None,
+                        allow_stale=payload.get("allowStale") is True,
+                    ),
+                    201,
+                )
             elif path == "/api/schedule":
                 self._json(self.app.store.schedule(str(payload["releaseDate"]), str(payload["setId"])), 201)
             elif path == "/api/releases/publish-due":
@@ -677,6 +751,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "Not found"}, 404)
         except KeyError as error:
             self._json({"error": str(error)}, 404)
+        except ScanChangedError as error:
+            self._json({"error": str(error), "state": "retry"}, 409)
+        except DailySetImportError as error:
+            self._json({"error": str(error)}, 400)
         except (ValueError, json.JSONDecodeError) as error:
             self._json({"error": str(error)}, 400)
         except Exception as error:
@@ -720,8 +798,13 @@ class Server(ThreadingHTTPServer):
 
 
 def run_server(args: argparse.Namespace) -> None:
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("Studio is owner-only and must bind to a loopback host")
     game_repo = args.game_repo.resolve()
-    app = App(Store(args.db.resolve()), game_repo)
+    import_roots = tuple(
+        path.resolve() for path in (args.import_root or [ROOT / "daily sets"])
+    )
+    app = App(Store(args.db.resolve()), game_repo, import_roots)
     server = Server((args.host, args.port), app)
     url = f"http://{args.host}:{server.server_port}/"
     print(f"R6 Soundle Studio: {url}")
@@ -743,9 +826,32 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--port", type=int, default=4180)
     result.add_argument("--db", type=Path, default=DEFAULT_DB)
     result.add_argument("--game-repo", type=Path, default=DEFAULT_GAME_REPO)
+    result.add_argument(
+        "--import-root", type=Path, action="append",
+        help="Allowed processed-media root; may be repeated (default: Studio daily sets)",
+    )
     result.add_argument("--no-browser", action="store_true")
+    result.add_argument("--self-test", action="store_true")
     return result
 
 
+def self_test() -> int:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = Store(Path(temporary) / "studio.db")
+        with store.connect() as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(captures)")}
+            required = {
+                "content_fingerprint", "schema_version", "processing_version",
+                "map_set", "slot", "imported_source",
+            }
+            if not required.issubset(columns):
+                raise RuntimeError("Phase 2 capture migration is incomplete")
+    print("Studio self-test passed: schema migration and transaction setup are ready.")
+    return 0
+
+
 if __name__ == "__main__":
-    run_server(parser().parse_args())
+    arguments = parser().parse_args()
+    if arguments.self_test:
+        raise SystemExit(self_test())
+    run_server(arguments)

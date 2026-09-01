@@ -9,6 +9,8 @@
     "name": { "type": "string", "minLength": 1 },
     "mapSlug": { "type": "string", "minLength": 1 },
     "mapAssetVersion": { "type": "string", "minLength": 1 },
+    "importedMapSet": { "type": "string", "pattern": "^[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "importFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "version": { "type": "integer", "minimum": 1 },
     "status": { "enum": ["draft", "ready", "approved", "archived"] },
     "rounds": {
@@ -23,8 +25,8 @@
       "type": "object",
       "required": ["x", "y", "floorKey"],
       "properties": {
-        "x": { "type": "number", "minimum": 0, "maximum": 1 },
-        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "x": { "type": "number", "description": "Coordinate in the calibrated square frame; full wide-map edges may fall outside 0–1." },
+        "y": { "type": "number", "description": "Coordinate in the calibrated square frame; full wide-map edges may fall outside 0–1." },
         "floorKey": { "type": "string", "minLength": 1 },
         "angle": { "type": "number" }
       }
@@ -43,4 +45,3 @@
     }
   }
 }
-

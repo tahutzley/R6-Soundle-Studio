@@ -11,6 +11,8 @@ const state = {
   tool: "listenerPos",
   dragging: null,
   operatorQuery: "",
+  importScan: null,
+  importTargetSetId: null,
 };
 
 const markerInfo = {
@@ -138,6 +140,15 @@ function coordinateFrame() {
   return selectedFloor()?.coordinateFrame || { x: 0, y: 0, width: 1, height: 1 };
 }
 
+function coordinateBounds(frame = coordinateFrame()) {
+  return {
+    minX: -frame.x / frame.width,
+    maxX: (1 - frame.x) / frame.width,
+    minY: -frame.y / frame.height,
+    maxY: (1 - frame.y) / frame.height,
+  };
+}
+
 function toAssetPoint(position) {
   const frame = coordinateFrame();
   return {
@@ -149,9 +160,10 @@ function toAssetPoint(position) {
 
 function toMapPoint(position) {
   const frame = coordinateFrame();
+  const bounds = coordinateBounds(frame);
   return {
-    x: Math.max(0, Math.min(1, (position.x - frame.x) / frame.width)),
-    y: Math.max(0, Math.min(1, (position.y - frame.y) / frame.height)),
+    x: clamp((position.x - frame.x) / frame.width, bounds.minX, bounds.maxX),
+    y: clamp((position.y - frame.y) / frame.height, bounds.minY, bounds.maxY),
   };
 }
 
@@ -238,16 +250,19 @@ function captureById(id) {
 }
 
 function roundComplete(round) {
-  return Boolean(round.operatorId && round.listenerPos && round.operatorStartPos && round.targetPos && captureById(round.captureId)?.status === "approved");
+  return Boolean(round.operatorId && round.listenerPos && round.operatorStartPos && round.targetPos && captureById(round.captureId));
 }
 
 function renderSetList() {
   $("#setList").innerHTML = state.sets.length ? state.sets.map((item) => `
-    <button class="set-item ${item.id === state.current?.id ? "active" : ""}" data-set-id="${item.id}">
-      <strong>${escapeHtml(item.name)}</strong>
-      <small>${escapeHtml(item.mapName || item.mapSlug || "No map")}</small>
-      <span class="pill ${escapeHtml(item.status)}">${escapeHtml(item.status)}</span>
-    </button>`).join("") : `<p class="hint">No sets yet.</p>`;
+    <div class="set-item ${item.id === state.current?.id ? "active" : ""}">
+      <button class="set-item-select" type="button" data-set-id="${escapeHtml(item.id)}">
+        <strong>${escapeHtml(item.name)}</strong>
+        <small>${escapeHtml(item.mapName || item.mapSlug || "No map")}</small>
+        <span class="pill ${escapeHtml(item.status)}">${escapeHtml(item.status)}</span>
+      </button>
+      <button class="set-item-delete" type="button" data-delete-set-id="${escapeHtml(item.id)}" aria-label="Delete ${escapeHtml(item.name)}" title="Delete set">×</button>
+    </div>`).join("") : `<p class="hint">No sets yet.</p>`;
 }
 
 function fillMapSelect() {
@@ -284,7 +299,7 @@ function renderEditor() {
   $("#roundHeading").textContent = `Round ${state.roundIndex + 1}`;
   renderOperatorField();
   $("#captureSelect").innerHTML = `<option value="">Attach processed capture</option>` + state.captures.map((capture) =>
-    `<option value="${capture.id}">${escapeHtml(capture.id)} · ${escapeHtml(capture.status)}</option>`).join("");
+    `<option value="${capture.id}">${escapeHtml(capture.id)}</option>`).join("");
   $("#captureSelect").value = round.captureId || "";
 
   const map = selectedMap();
@@ -770,7 +785,6 @@ async function refreshData() {
   ]);
   if (state.current) state.current = state.sets.find((item) => item.id === state.current.id) || null;
   renderEditor();
-  renderCaptures();
   renderSchedule();
 }
 
@@ -846,33 +860,81 @@ async function saveSet(status) {
   toast("Set approved");
 }
 
-async function deleteCurrentSet() {
-  if (!state.current) return;
-  const setId = state.current.id;
-  const setName = state.current.name || "Untitled set";
+async function deleteSet(setId) {
+  const item = state.sets.find((candidate) => candidate.id === setId);
+  if (!item) return;
+  const setName = item.name || "Untitled set";
   if (!window.confirm(`Delete “${setName}”? This also removes it from the release calendar.`)) return;
-  clearTimeout(autoSaveTimer);
-  autoSaveTimer = null;
+  if (state.current?.id === setId) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+  } else if (autoSaveTimer) {
+    await persistDraft();
+  }
   await autoSavePromise.catch(() => {});
   await api(`/api/sets/${setId}`, { method: "DELETE" });
-  state.current = null;
+  if (state.current?.id === setId) state.current = null;
   await refreshData();
   toast("Set deleted");
 }
 
-function renderCaptures() {
-  const captureList = $("#captureList");
-  captureList.innerHTML = state.captures.length ? state.captures.map((capture) => `
-    <div class="capture-item">
-      <img src="/media/${encodeURIComponent(capture.id)}/listener.jpg" alt="Listener still">
-      <div>
-        <strong>${escapeHtml(capture.id)}</strong>
-        <small>${escapeHtml(capture.status)} · offset ${Number(capture.alignment.runnerOffsetMs || 0).toFixed(1)} ms · ${Number(capture.durationSeconds || 0).toFixed(2)} s</small>
-        ${audioPlayerMarkup(`/media/${encodeURIComponent(capture.id)}/replay.mp4`)}
-      </div>
-      ${capture.status === "approved" ? `<span class="pill">approved</span>` : `<button type="button" data-approve-capture="${capture.id}">Approve</button>`}
-    </div>`).join("") : `<p class="hint">No captures imported yet.</p>`;
-  captureList.querySelectorAll(".studio-audio-player").forEach((player) => setupCaptureAudioPlayer(player));
+const importStateCopy = {
+  empty: ["Enter a daily-set folder name", "Type number-mapname, such as 1-bank. Studio looks inside the daily sets directory automatically."],
+  scanning: ["Scanning three rounds…", "Studio is validating manifests, media hashes, durations, identities, and the current map catalog."],
+  valid: ["Three rounds are ready", "Choose a new or compatible existing draft, then import all three captures in one transaction."],
+  partially_invalid: ["The daily set is incomplete or invalid", "Correct every listed slot or directory error, then scan the same directory again."],
+  legacy_unindexed: ["Legacy daily set needs preparation", "Generate capture-v1 manifests for this set, then scan it again."],
+  conflict: ["The import conflicts with Studio data", "Resolve the listed identity or draft conflict. No database rows have been changed."],
+  reprocessed: ["Reprocessed capture content found", "Importing will replace changed capture metadata and return affected drafts to review."],
+  stale: ["A scheduled draft will become stale", "Confirm the stale transition before import. The affected set must be reviewed, approved, and rescheduled."],
+  importing: ["Importing three rounds…", "Studio is revalidating the scan and committing captures plus the draft as one transaction."],
+  success: ["Daily set imported", "All three captures are attached and ready to use. Complete the manual fields and review the attached media before approving the set."],
+  retry: ["Import stopped safely", "Nothing was partially imported. Review the message, scan again, and retry."],
+};
+
+function renderImportReport(report = { state: "empty" }) {
+  const view = $("#importReport");
+  const stateName = report.state || "retry";
+  const [title, defaultMessage] = importStateCopy[stateName] || importStateCopy.retry;
+  const source = report.source?.mapSet ? ` <span class="pill">${escapeHtml(report.source.mapSet)} · ${escapeHtml(report.source.mapName)}</span>` : "";
+  const slots = (report.slots || []).map((slot) => `
+    <article class="import-slot ${["invalid", "legacy"].includes(slot.state) ? slot.state : ""}">
+      <strong>Round ${slot.slot} · ${escapeHtml(slot.relation || slot.state)}</strong>
+      <small>${escapeHtml(slot.captureId || slot.summary || "No valid capture")}</small>
+      ${slot.errors?.length ? `<ul>${slot.errors.map((error) => `<li>${escapeHtml(error)}</li>`).join("")}</ul>` : ""}
+      ${slot.manualFields?.length ? `<ul>${slot.manualFields.map((field) => `<li>${escapeHtml(field)}</li>`).join("")}</ul>` : ""}
+    </article>`).join("");
+  const conflicts = report.conflicts?.length
+    ? `<ul class="import-conflicts">${report.conflicts.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : "";
+  const legacyCommand = report.legacyIndexCommand
+    ? `<div class="legacy-command"><span>One-set preparation command</span><code>${escapeHtml(report.legacyIndexCommand)}</code></div>` : "";
+  view.dataset.state = stateName;
+  view.innerHTML = `
+    <div class="import-report-heading">
+      <span class="import-state-icon" aria-hidden="true">${["valid", "success"].includes(stateName) ? "✓" : ["scanning", "importing"].includes(stateName) ? "…" : ["empty"].includes(stateName) ? "○" : "!"}</span>
+      <div><strong>${escapeHtml(title)}</strong>${source}<p>${escapeHtml(report.message || defaultMessage)}</p>${conflicts}${legacyCommand}</div>
+    </div>
+    ${slots ? `<div class="import-slot-grid">${slots}</div>` : ""}`;
+
+  const controls = $("#importCommitControls");
+  const canCommit = Boolean(report.canCommit && !["scanning", "importing", "success", "retry"].includes(stateName));
+  controls.hidden = !canCommit;
+  if (!canCommit) return;
+  const options = report.draftOptions || [];
+  $("#importTargetSet").innerHTML = `<option value="">Create a new draft</option>` + options.map((item) =>
+    `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}${item.exactMatch ? " · current import" : ""}</option>`).join("");
+  const preferredTarget = options.some((item) => item.id === state.importTargetSetId)
+    ? state.importTargetSetId : report.draftMatch?.id;
+  $("#importTargetSet").value = preferredTarget || "";
+  $("#staleConfirmation").hidden = !report.requiresStaleConfirmation;
+  $("#allowStaleImport").checked = false;
+  $("#commitDailySet").textContent = report.isIdempotentRetry ? "Confirm unchanged import" : "Import three rounds";
+  updateImportCommitAvailability();
+}
+
+function updateImportCommitAvailability() {
+  const requiresConfirmation = !$("#staleConfirmation").hidden;
+  $("#commitDailySet").disabled = requiresConfirmation && !$("#allowStaleImport").checked;
 }
 
 function renderSchedule() {
@@ -890,6 +952,11 @@ function renderSchedule() {
 $("#newSet").addEventListener("click", () => createSet().catch((error) => toast(error.message)));
 $("#emptyNewSet").addEventListener("click", () => createSet().catch((error) => toast(error.message)));
 $("#setList").addEventListener("click", async (event) => {
+  const deleteButton = event.target.closest("[data-delete-set-id]");
+  if (deleteButton) {
+    deleteSet(deleteButton.dataset.deleteSetId).catch((error) => toast(error.message));
+    return;
+  }
   const button = event.target.closest("[data-set-id]");
   if (!button) return;
   if (autoSaveTimer) await persistDraft();
@@ -1131,27 +1198,85 @@ $("#clearRound").addEventListener("click", () => {
   scheduleDraftSave();
 });
 $("#approveSet").addEventListener("click", () => saveSet("approved").catch((error) => toast(error.message)));
-$("#deleteSet").addEventListener("click", () => deleteCurrentSet().catch((error) => toast(error.message)));
-$("#showCaptures").addEventListener("click", () => {
+function openImportDialog(targetSetId = null) {
+  state.importTargetSetId = targetSetId;
   $("#captureDialog").showModal();
-  requestAnimationFrame(renderCaptures);
+  requestAnimationFrame(() => {
+    const target = state.sets.find((item) => item.id === targetSetId);
+    renderImportReport(state.importScan || {
+      state: "empty",
+      message: target
+        ? `Scan a processed directory to attach all three rounds to ${target.name}.`
+        : undefined,
+    });
+  });
+}
+$("#showImport").addEventListener("click", () => openImportDialog());
+$("#importDailySet").addEventListener("click", async () => {
+  try {
+    if (autoSaveTimer) await persistDraft();
+    openImportDialog(state.current?.id || null);
+  } catch (error) { toast(error.message); }
 });
 $("#showSchedule").addEventListener("click", () => $("#scheduleDialog").showModal());
+$("#scanDailySet").addEventListener("click", async () => {
+  const directoryPath = $("#dailySetPath").value.trim();
+  if (!directoryPath) {
+    state.importScan = { state: "empty", message: "Enter a folder name such as 1-bank before scanning." };
+    renderImportReport(state.importScan);
+    return;
+  }
+  renderImportReport({ state: "scanning" });
+  try {
+    state.importScan = await api("/api/imports/scan", {
+      method: "POST",
+      body: JSON.stringify({ directoryPath }),
+    });
+    renderImportReport(state.importScan);
+  } catch (error) {
+    state.importScan = { state: "retry", message: error.message };
+    renderImportReport(state.importScan);
+  }
+});
+$("#allowStaleImport").addEventListener("change", updateImportCommitAvailability);
+$("#commitDailySet").addEventListener("click", async () => {
+  if (!state.importScan?.scanId) return;
+  const prior = state.importScan;
+  renderImportReport({ ...prior, state: "importing", canCommit: false });
+  try {
+    const result = await api("/api/imports/commit", {
+      method: "POST",
+      body: JSON.stringify({
+        scanId: prior.scanId,
+        targetSetId: $("#importTargetSet").value || null,
+        allowStale: $("#allowStaleImport").checked,
+      }),
+    });
+    state.importScan = {
+      state: "success",
+      source: prior.source,
+      slots: prior.slots,
+      message: result.idempotent
+        ? "This directory was already attached; no capture or draft rows changed."
+        : `Imported ${result.insertedCaptures} new and ${result.updatedCaptures} reprocessed captures into ${result.set.name}.`,
+    };
+    await refreshData();
+    state.importTargetSetId = result.set.id;
+    state.current = state.sets.find((item) => item.id === result.set.id) || state.current;
+    renderEditor();
+    renderImportReport(state.importScan);
+    toast(result.idempotent ? "Daily set already up to date" : "Three rounds imported; review media and manual fields");
+  } catch (error) {
+    state.importScan = { ...prior, state: "retry", canCommit: false, message: error.message };
+    renderImportReport(state.importScan);
+  }
+});
 $("#importCapture").addEventListener("click", async () => {
   try {
     await api("/api/captures/import", { method: "POST", body: JSON.stringify({ manifestPath: $("#manifestPath").value }) });
     $("#manifestPath").value = "";
     await refreshData();
-    toast("Capture imported; review and approve it");
-  } catch (error) { toast(error.message); }
-});
-$("#captureList").addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-approve-capture]");
-  if (!button) return;
-  try {
-    await api(`/api/captures/${button.dataset.approveCapture}/approve`, { method: "POST", body: "{}" });
-    await refreshData();
-    toast("Capture approved");
+    toast("Capture imported and ready to use");
   } catch (error) { toast(error.message); }
 });
 $("#scheduleSetButton").addEventListener("click", async () => {

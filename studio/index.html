@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#07090d">
     <title>R6 Soundle Studio</title>
-    <link rel="stylesheet" href="/styles.css?v=20260823-10">
+    <link rel="stylesheet" href="/styles.css?v=20260901-p2f">
   </head>
   <body>
     <header class="topbar">
@@ -25,7 +25,7 @@
         </div>
         <div id="setList" class="set-list"></div>
         <div class="sidebar-footer">
-          <button id="showCaptures">Capture inbox</button>
+          <button id="showImport">Import daily set</button>
           <button id="showSchedule">Release calendar</button>
         </div>
       </aside>
@@ -51,7 +51,7 @@
                 <select id="mapSelect"></select>
               </label>
               <div class="editor-actions">
-                <button class="danger-button" id="deleteSet">Delete set</button>
+                <button id="importDailySet">Import daily set</button>
                 <button class="primary" id="approveSet">Approve set</button>
               </div>
             </div>
@@ -114,7 +114,7 @@
               <label><span>Processed capture</span><select id="captureSelect"></select></label>
 
               <div class="capture-preview" id="capturePreview">
-                <div class="preview-empty">Attach an approved capture</div>
+                <div class="preview-empty">Attach a processed capture</div>
               </div>
 
               <button id="clearRound" class="danger-text">Clear this round</button>
@@ -128,15 +128,35 @@
     <dialog id="captureDialog">
       <form method="dialog" class="dialog-card">
         <div class="section-title">
-          <div><p class="eyebrow">MEDIA</p><h2>Capture inbox</h2></div>
+          <div><p class="eyebrow">MEDIA</p><h2>Daily-set import</h2></div>
           <button class="icon-button" value="cancel">×</button>
         </div>
-        <p>Run the processor first, then import its <code>capture.json</code>. Review the still, audio, and replay before approving it.</p>
+        <p>Enter the processed folder name from <code>daily sets</code>, such as <code>1-bank</code>. Studio validates all three rounds before it changes the draft database.</p>
         <div class="inline-form">
-          <input id="manifestPath" placeholder="D:\captures\round-1\capture.json">
-          <button type="button" class="primary" id="importCapture">Import</button>
+          <input id="dailySetPath" aria-label="Daily-set folder name" placeholder="1-bank" autocomplete="off" spellcheck="false">
+          <button type="button" class="primary" id="scanDailySet">Scan three rounds</button>
         </div>
-        <div id="captureList" class="capture-list"></div>
+        <section id="importReport" class="import-report" data-state="empty" aria-live="polite">
+          <div class="import-report-heading">
+            <span class="import-state-icon" aria-hidden="true">○</span>
+            <div><strong>Choose a daily-set directory</strong><p>Scanning is read-only. No capture or draft rows are created until you confirm the import.</p></div>
+          </div>
+        </section>
+        <div id="importCommitControls" class="import-commit-controls" hidden>
+          <label><span>Attach to draft</span><select id="importTargetSet"></select></label>
+          <label id="staleConfirmation" class="stale-confirmation" hidden>
+            <input type="checkbox" id="allowStaleImport">
+            <span>I understand the scheduled draft becomes stale and must be reviewed, approved, and rescheduled.</span>
+          </label>
+          <button type="button" class="primary" id="commitDailySet">Import three rounds</button>
+        </div>
+        <details class="legacy-import">
+          <summary>Compatibility: import one capture manifest</summary>
+          <div class="inline-form">
+            <input id="manifestPath" aria-label="Single capture manifest" placeholder="D:\captures\round-1\capture.json">
+            <button type="button" id="importCapture">Import one</button>
+          </div>
+        </details>
       </form>
     </dialog>
 
@@ -157,6 +177,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status"></div>
-    <script type="module" src="/app.js?v=20260823-10"></script>
+    <script type="module" src="/app.js?v=20260901-p2f"></script>
   </body>
 </html>
