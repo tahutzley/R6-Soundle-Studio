@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import calendar
 import json
 import math
 import mimetypes
@@ -23,6 +22,7 @@ from pathlib import Path
 from threading import Lock, Timer
 from typing import Any, Callable
 from urllib.parse import quote, unquote, urlparse
+from zoneinfo import ZoneInfo
 
 from processor.capture_contract import read_and_validate_capture, resolve_capture_file
 from studio_import import (
@@ -39,6 +39,7 @@ DEFAULT_DB = ROOT / "studio.db"
 DEFAULT_GAME_REPO = ROOT.parent / "R6-Soundle"
 PREVIEW_SCHEMA_VERSION = 1
 PREVIEW_TTL = timedelta(minutes=30)
+EASTERN = ZoneInfo("America/New_York")
 GAME_PREVIEW_ASSET_PREFIXES = (
     "branding/", "css/", "fonts/", "hero/", "icons/", "js/", "maps/", "operators/",
 )
@@ -126,25 +127,7 @@ def parse_iso(value: str) -> datetime:
 
 def release_at_for_date(value: str) -> str:
     release_date = date.fromisoformat(value)
-    # Midnight is before the 02:00 clock transition on both changeover days.
-    # This avoids requiring the optional `tzdata` wheel on Windows while still
-    # following the post-2007 America/New_York rules used by the project.
-    march_sundays = [
-        day for day in range(1, 15)
-        if calendar.weekday(release_date.year, 3, day) == calendar.SUNDAY
-    ]
-    november_sundays = [
-        day for day in range(1, 8)
-        if calendar.weekday(release_date.year, 11, day) == calendar.SUNDAY
-    ]
-    dst_start = date(release_date.year, 3, march_sundays[1])
-    dst_end = date(release_date.year, 11, november_sundays[0])
-    utc_offset = -4 if dst_start < release_date <= dst_end else -5
-    local_midnight = datetime.combine(
-        release_date,
-        time.min,
-        timezone(timedelta(hours=utc_offset), "America/New_York"),
-    )
+    local_midnight = datetime.combine(release_date, time.min, EASTERN)
     return iso_utc(local_midnight)
 
 

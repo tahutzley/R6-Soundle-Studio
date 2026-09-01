@@ -1,0 +1,9 @@
+{
+  "authorityRepository": "R6-Soundle",
+  "authorityPath": "contracts/release-v1.schema.json",
+  "authorityRevision": "working-tree",
+  "authorityBaseRevision": "5d4c06822fa2f1bab99f4fb411de819766175644",
+  "schemaVersion": 1,
+  "canonicalJsonSha256": "270d9029ff8f709c1b488d3e8f31dd723be2837d7d13eacea34f1f0cf1af5e2d"
+}
+

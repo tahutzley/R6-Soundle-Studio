@@ -1,0 +1,2 @@
+# Keep the IANA timezone database available on Windows for release scheduling.
+tzdata==2026.3

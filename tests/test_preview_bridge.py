@@ -183,6 +183,15 @@ class PreviewBridgeTests(unittest.TestCase):
         self.assertEqual(source["canonicalJsonSha256"], self._canonical_hash(game_schema))
         self.assertEqual(self._canonical_hash(game_schema), self._canonical_hash(studio_schema))
 
+    def test_vendored_release_schema_matches_game_authority(self) -> None:
+        studio_schema = Path(__file__).resolve().parents[1] / "schemas" / "game-release-v1.schema.json"
+        source = json.loads((studio_schema.parent / "game-release-v1.source.json").read_text(encoding="utf-8"))
+        game_schema = Path(__file__).resolve().parents[2] / "R6-Soundle" / source["authorityPath"]
+        if not game_schema.is_file():
+            self.skipTest("Sibling game checkout is unavailable")
+        self.assertEqual(source["canonicalJsonSha256"], self._canonical_hash(game_schema))
+        self.assertEqual(self._canonical_hash(game_schema), self._canonical_hash(studio_schema))
+
 
 if __name__ == "__main__":
     unittest.main()

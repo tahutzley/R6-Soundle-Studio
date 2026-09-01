@@ -74,7 +74,6 @@ class StudioStoreTests(unittest.TestCase):
             }
         )
         item["status"] = "approved"
-
         approved = self.store.save_set(item, item["id"])
 
         self.assertEqual("approved", approved["status"])
@@ -108,8 +107,19 @@ class StudioStoreTests(unittest.TestCase):
         self.assertEqual("/media/1-bank%2F1/replay.mp4", puzzle["rounds"][0]["replayVideoUrl"])
 
     def test_new_york_midnight_handles_daylight_saving(self) -> None:
-        self.assertEqual("2026-01-10T05:00:00Z", release_at_for_date("2026-01-10"))
-        self.assertEqual("2026-07-10T04:00:00Z", release_at_for_date("2026-07-10"))
+        cases = {
+            "2026-01-10": "2026-01-10T05:00:00Z",
+            "2026-03-08": "2026-03-08T05:00:00Z",
+            "2026-03-09": "2026-03-09T04:00:00Z",
+            "2026-07-10": "2026-07-10T04:00:00Z",
+            "2026-11-01": "2026-11-01T04:00:00Z",
+            "2026-11-02": "2026-11-02T05:00:00Z",
+            "2028-02-29": "2028-02-29T05:00:00Z",
+            "2040-07-04": "2040-07-04T04:00:00Z",
+        }
+        for local_date, expected in cases.items():
+            with self.subTest(local_date=local_date):
+                self.assertEqual(expected, release_at_for_date(local_date))
 
     def test_catalog_exposes_browser_ready_operator_artwork(self) -> None:
         game_repo = self.root / "game"

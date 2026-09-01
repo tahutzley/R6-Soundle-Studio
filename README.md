@@ -17,7 +17,13 @@ The current milestone is a local-first studio:
 
 ## Start the studio
 
-Python 3.11 or newer is recommended. No Python packages are required.
+Python 3.11 or newer is recommended. Install the pinned timezone database once
+so `America/New_York` release calculations behave identically on Windows and
+Unix:
+
+```powershell
+python -m pip install -r requirements.txt
+```
 
 ```powershell
 scripts\run-studio.bat
@@ -199,6 +205,10 @@ explicit preview failures or warnings. Closing a preview never edits its draft.
 The game repository owns `contracts/preview-v1.schema.json`. Studio vendors the
 supported contract under `schemas/` with source revision and canonical hash
 metadata; the preview bridge test rejects unreviewed drift.
+
+Studio also vendors the game-owned `release-v1` schema and provenance metadata.
+Phase 4 establishes that compatibility boundary; the remote publisher does not
+use it until the later resumable-publishing phase.
 
 ## Run checks
 
