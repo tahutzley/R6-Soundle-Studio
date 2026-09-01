@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -44,6 +45,65 @@ class StudioStoreTests(unittest.TestCase):
         item = self.store.save_set({"name": "Test", "mapSlug": "bank", "rounds": []})
         self.assertEqual([1, 2, 3], [round_item["position"] for round_item in item["rounds"]])
         self.assertNotIn("difficulty", item["rounds"][0])
+
+    def test_phase5_publish_fields_are_additive_and_inert(self) -> None:
+        with self.store.connect() as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertIn("publish_attempts", tables)
+            published_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(published_releases)")
+            }
+            self.assertTrue(
+                {
+                    "remote_release_id",
+                    "remote_release_version_id",
+                    "publisher_idempotency_key",
+                }.issubset(published_columns)
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM publish_attempts").fetchone()[0],
+                0,
+            )
+
+    def test_phase5_migration_preserves_existing_published_snapshot(self) -> None:
+        legacy_path = self.root / "legacy-v2.db"
+        connection = sqlite3.connect(legacy_path)
+        try:
+            connection.execute(
+                """CREATE TABLE published_releases (
+                       release_date TEXT PRIMARY KEY,
+                       release_at TEXT NOT NULL,
+                       set_id TEXT NOT NULL,
+                       set_version INTEGER NOT NULL,
+                       snapshot_json TEXT NOT NULL,
+                       published_at TEXT NOT NULL
+                   )"""
+            )
+            connection.execute(
+                "INSERT INTO published_releases VALUES (?, ?, ?, ?, ?, ?)",
+                ("2026-08-31", "2026-08-31T04:00:00Z", "set-1", 2, "{}", "2026-08-31T04:00:01Z"),
+            )
+            connection.execute("PRAGMA user_version = 2")
+            connection.commit()
+        finally:
+            connection.close()
+
+        migrated = Store(legacy_path)
+        with migrated.connect() as migrated_connection:
+            row = migrated_connection.execute(
+                "SELECT * FROM published_releases WHERE release_date='2026-08-31'"
+            ).fetchone()
+            self.assertEqual(row["set_id"], "set-1")
+            self.assertEqual(row["set_version"], 2)
+            self.assertIsNone(row["remote_release_id"])
+            self.assertEqual(migrated_connection.execute("PRAGMA user_version").fetchone()[0], 3)
 
     def test_set_can_be_deleted(self) -> None:
         item = self.store.save_set({"name": "Disposable", "mapSlug": "bank", "rounds": []})

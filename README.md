@@ -186,6 +186,10 @@ trusted telemetry contract exists.
 Existing Studio databases migrate additively on startup. Capture rows gain a
 content fingerprint, schema/processing versions, map-set/slot identity, and an
 import-source label; existing rows and local owner state are preserved.
+Phase 5 also adds inert local publish-attempt and remote release-ID fields so a
+later resumable publisher can record progress without putting database or
+object-store credentials in Studio. Drafts and captures remain SQLite-only
+owner state and are never imported automatically into production.
 
 ## Preview a draft in the real game
 

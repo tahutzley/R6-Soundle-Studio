@@ -108,7 +108,24 @@ CREATE TABLE IF NOT EXISTS published_releases (
     set_id TEXT NOT NULL,
     set_version INTEGER NOT NULL,
     snapshot_json TEXT NOT NULL,
-    published_at TEXT NOT NULL
+    published_at TEXT NOT NULL,
+    remote_release_id TEXT,
+    remote_release_version_id TEXT,
+    publisher_idempotency_key TEXT
+);
+CREATE TABLE IF NOT EXISTS publish_attempts (
+    id TEXT PRIMARY KEY,
+    release_date TEXT NOT NULL,
+    set_id TEXT NOT NULL REFERENCES puzzle_sets(id),
+    set_version INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK(state IN ('approved', 'uploading', 'upload_failed', 'scheduled')),
+    retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count >= 0),
+    remote_release_id TEXT,
+    remote_release_version_id TEXT,
+    error_summary TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -241,7 +258,25 @@ class Store:
             """CREATE UNIQUE INDEX IF NOT EXISTS captures_map_set_slot_unique
                ON captures(map_set, slot) WHERE map_set IS NOT NULL AND slot IS NOT NULL"""
         )
-        connection.execute("PRAGMA user_version = 2")
+        published_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(published_releases)")
+        }
+        published_additions = {
+            "remote_release_id": "TEXT",
+            "remote_release_version_id": "TEXT",
+            "publisher_idempotency_key": "TEXT",
+        }
+        for name, declaration in published_additions.items():
+            if name not in published_columns:
+                connection.execute(
+                    f"ALTER TABLE published_releases ADD COLUMN {name} {declaration}"
+                )
+        connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS published_releases_remote_version_unique
+               ON published_releases(remote_release_version_id)
+               WHERE remote_release_version_id IS NOT NULL"""
+        )
+        connection.execute("PRAGMA user_version = 3")
 
     @contextmanager
     def connect(self):
