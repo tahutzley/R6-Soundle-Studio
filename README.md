@@ -272,6 +272,15 @@ non-secret test bearer token. It never opens `studio.db`, `daily sets`, `videos`
 `media/raw`, `media/processed`, `.env`, or `config.local.json` from an owner
 workspace.
 
+Phase 10's entry point is `tools/run_launch_rehearsal.py` in the sibling game
+repository. `rehearsal_support.py` owns Studio's synthetic-only portion: it
+creates named fake recordings under the caller's temporary root, drives the
+real atomic processor through isolated media-tool shims, imports exactly three
+rounds, authors fixture coordinates, approves a version, and opens an immutable
+real-game preview. The processor's hidden `--failure-after` hook refuses to run
+unless `R6_PROCESSOR_FAULT_INJECTION=YES`; it exists only for this isolated
+rehearsal and its atomicity tests.
+
 ## Next milestones
 
 The local data model and media contract support authenticated resumable release

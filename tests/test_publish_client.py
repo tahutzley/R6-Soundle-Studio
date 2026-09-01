@@ -205,6 +205,20 @@ class StudioPublishClientTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stale map assets"):
                 publisher.publish("2026-09-02", item["id"])
 
+    def test_correction_bundle_requires_revision_and_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = Store(Path(temporary) / "studio.db")
+            publisher = StudioPublisher(
+                store,
+                {"assetVersion": "test", "maps": [], "operators": []},
+                5,
+                client=None,  # type: ignore[arg-type]
+            )
+            with self.assertRaisesRegex(ValueError, "both expected_revision and reason"):
+                publisher._bundle("2026-09-02", "missing", expected_revision=1)
+            with self.assertRaisesRegex(ValueError, "both expected_revision and reason"):
+                publisher._bundle("2026-09-02", "missing", reason="fix")
+
 
 if __name__ == "__main__":
     unittest.main()

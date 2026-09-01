@@ -636,6 +636,11 @@ def parser() -> argparse.ArgumentParser:
         help="Validate and display the processing queue without running FFmpeg",
     )
     result.add_argument("--self-test", action="store_true")
+    result.add_argument(
+        "--failure-after",
+        choices=("evidence_still", "evidence_audio", "replay_video", "validated_media", "manifest"),
+        help=argparse.SUPPRESS,
+    )
     return result
 
 
@@ -646,6 +651,10 @@ if __name__ == "__main__":
         self_test()
     else:
         try:
+            if arguments.failure_after and os.environ.get("R6_PROCESSOR_FAULT_INJECTION") != "YES":
+                argument_parser.error(
+                    "--failure-after is reserved for the isolated launch rehearsal"
+                )
             explicit_pair = arguments.listener is not None or arguments.runner is not None
             if arguments.input and explicit_pair:
                 argument_parser.error("Use either --input or --listener/--runner, not both")

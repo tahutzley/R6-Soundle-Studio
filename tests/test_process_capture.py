@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -26,6 +28,26 @@ from capture_contract import hash_file, read_and_validate_capture
 
 
 class CaptureNamingTests(unittest.TestCase):
+    def test_cli_fault_hook_is_closed_without_explicit_rehearsal_opt_in(self) -> None:
+        environment = dict(os.environ)
+        environment.pop("R6_PROCESSOR_FAULT_INJECTION", None)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "processor" / "process_capture.py"),
+                "--failure-after",
+                "manifest",
+                "--validate-only",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("reserved for the isolated launch rehearsal", result.stderr)
+
     def test_name_maps_to_daily_set_and_slot(self) -> None:
         self.assertEqual(
             CaptureName("1-clubhouse", 3, "listener"),

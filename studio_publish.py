@@ -152,8 +152,21 @@ class StudioPublisher:
         self.scoring_version = scoring_version
         self.client = client
 
-    def _bundle(self, release_date: str, set_id: str) -> PublishBundle:
+    def _bundle(
+        self,
+        release_date: str,
+        set_id: str,
+        *,
+        expected_revision: int | None = None,
+        reason: str | None = None,
+    ) -> PublishBundle:
         date.fromisoformat(release_date)
+        if (expected_revision is None) != (reason is None):
+            raise ValueError("A correction requires both expected_revision and reason")
+        if expected_revision is not None and expected_revision <= 0:
+            raise ValueError("Correction expected_revision must be positive")
+        if reason is not None and not reason.strip():
+            raise ValueError("Correction reason must not be empty")
         item = self.store.get_set(set_id)
         if not item:
             raise KeyError("Set not found")
@@ -234,6 +247,9 @@ class StudioPublisher:
             },
             "media": media,
         }
+        if expected_revision is not None:
+            payload["expectedRevision"] = expected_revision
+            payload["reason"] = reason.strip()  # type: ignore[union-attr]
         return PublishBundle(payload, paths)
 
     def _local_attempt(self, release_date: str, set_id: str, bundle: PublishBundle) -> dict[str, Any]:
@@ -369,8 +385,21 @@ class StudioPublisher:
             )
         return self.get_attempt(attempt["id"])
 
-    def publish(self, release_date: str, set_id: str, *, interrupt_after: int | None = None) -> dict[str, Any]:
-        bundle = self._bundle(release_date, set_id)
+    def publish(
+        self,
+        release_date: str,
+        set_id: str,
+        *,
+        interrupt_after: int | None = None,
+        expected_revision: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        bundle = self._bundle(
+            release_date,
+            set_id,
+            expected_revision=expected_revision,
+            reason=reason,
+        )
         attempt = self._local_attempt(release_date, set_id, bundle)
         decoded = self._decode_attempt(dict(attempt))
         if decoded["state"] == "scheduled":
