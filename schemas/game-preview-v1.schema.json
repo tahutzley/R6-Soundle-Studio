@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r6soundle.example/contracts/preview-v1.schema.json",
+  "title": "R6 Soundle local preview v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "scoringVersion", "session", "displayDate", "set", "assetVersion", "issues", "puzzle"],
+  "properties": {
+    "kind": { "const": "r6-soundle-preview" },
+    "schemaVersion": { "const": 1 },
+    "scoringVersion": { "type": "integer", "minimum": 1 },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "expiresAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 32, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "displayDate": { "type": "string", "format": "date" },
+    "set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "mapAssetVersion"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "mapAssetVersion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "assetVersion": { "type": "string", "minLength": 1 },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": { "type": "string", "minLength": 1 },
+          "severity": { "enum": ["warning", "error"] },
+          "message": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "puzzle": { "$ref": "#/$defs/puzzle" }
+  },
+  "$defs": {
+    "position": {
+      "type": ["object", "null"],
+      "required": ["x", "y", "floorKey"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "floorKey": { "type": "string", "minLength": 1 },
+        "angle": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "round": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["position", "operatorId", "evidenceImageUrl", "videoUrl", "replayVideoUrl", "listenerPos", "operatorStartPos", "targetPos"],
+      "properties": {
+        "position": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "operatorId": { "type": ["string", "null"] },
+        "evidenceImageUrl": { "type": ["string", "null"] },
+        "videoUrl": { "type": ["string", "null"] },
+        "replayVideoUrl": { "type": ["string", "null"] },
+        "listenerPos": { "$ref": "#/$defs/position" },
+        "operatorStartPos": { "$ref": "#/$defs/position" },
+        "targetPos": { "$ref": "#/$defs/position" }
+      }
+    },
+    "puzzle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["date", "mapName", "mapSlug", "rounds"],
+      "properties": {
+        "date": { "type": "string", "format": "date" },
+        "mapName": { "type": "string", "minLength": 1 },
+        "mapSlug": { "type": "string", "minLength": 1 },
+        "rounds": { "type": "array", "minItems": 3, "maxItems": 3, "items": { "$ref": "#/$defs/round" } }
+      }
+    }
+  }
+}

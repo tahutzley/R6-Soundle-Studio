@@ -8,6 +8,7 @@ import calendar
 import json
 import math
 import mimetypes
+import secrets
 import sqlite3
 import sys
 import tempfile
@@ -19,8 +20,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Timer
-from typing import Any
+from threading import Lock, Timer
+from typing import Any, Callable
 from urllib.parse import quote, unquote, urlparse
 
 from processor.capture_contract import read_and_validate_capture, resolve_capture_file
@@ -36,6 +37,16 @@ ROOT = Path(__file__).resolve().parent
 STUDIO_DIR = ROOT / "studio"
 DEFAULT_DB = ROOT / "studio.db"
 DEFAULT_GAME_REPO = ROOT.parent / "R6-Soundle"
+PREVIEW_SCHEMA_VERSION = 1
+PREVIEW_TTL = timedelta(minutes=30)
+GAME_PREVIEW_ASSET_PREFIXES = (
+    "branding/", "css/", "fonts/", "hero/", "icons/", "js/", "maps/", "operators/",
+)
+GAME_PREVIEW_ASSET_FILES = {
+    "data/operator_catalog.json",
+    "data/scoring.json",
+    "clips/Screen Recording 2026-06-28 235114.mp4",
+}
 MAP_NAMES = {
     "bank": "Bank",
     "border": "Border",
@@ -602,6 +613,168 @@ def floor_label(key: str) -> str:
     return key.replace("-", " ").title()
 
 
+class PreviewExpiredError(KeyError):
+    pass
+
+
+@dataclass(frozen=True)
+class PreviewSession:
+    token: str
+    set_id: str
+    set_version: int
+    expires_at: datetime
+    contract: dict[str, Any]
+    media: dict[str, Path]
+
+
+class PreviewSessions:
+    def __init__(
+        self,
+        app: "App",
+        ttl: timedelta = PREVIEW_TTL,
+        now: Callable[[], datetime] = utc_now,
+    ) -> None:
+        self.app = app
+        self.ttl = ttl
+        self.now = now
+        self._items: dict[str, PreviewSession] = {}
+        self._lock = Lock()
+
+    def _snapshot(
+        self,
+        item: dict[str, Any],
+        display_date: str,
+        token: str,
+        expires_at: datetime,
+    ) -> PreviewSession:
+        date.fromisoformat(display_date)
+        catalog = self.app.catalog
+        captures = {capture["id"]: capture for capture in self.app.store.list_captures()}
+        operator_ids = {operator["id"] for operator in catalog.get("operators", [])}
+        scoring_path = self.app.game_repo / "assets" / "data" / "scoring.json"
+        scoring = json.loads(scoring_path.read_text(encoding="utf-8"))
+        issues: list[dict[str, str]] = []
+        if item.get("mapAssetVersion") != catalog["assetVersion"]:
+            issues.append({
+                "code": "STALE_MAP_ASSET",
+                "severity": "warning",
+                "message": "This draft was authored against a different map-asset version. Review marker placement before approval.",
+            })
+        media: dict[str, Path] = {}
+        rounds: list[dict[str, Any]] = []
+        for index, source in enumerate(item.get("rounds") or [], 1):
+            operator_id = source.get("operatorId")
+            complete = operator_id in operator_ids and all(
+                position_is_valid(source.get(key))
+                for key in ("listenerPos", "operatorStartPos", "targetPos")
+            )
+            if not complete:
+                issues.append({
+                    "code": f"INCOMPLETE_ROUND_{index}",
+                    "severity": "error",
+                    "message": f"Round {index} is incomplete. Add its operator and all listener/runner markers in Studio.",
+                })
+            capture = captures.get(source.get("captureId"))
+            image_url: str | None = None
+            audio_url: str | None = None
+            replay_url: str | None = None
+            if capture:
+                encoded_id = quote(capture["id"], safe="")
+                image_relative = f"{encoded_id}/listener.jpg"
+                audio_relative = f"{encoded_id}/listener.m4a"
+                replay_relative = f"{encoded_id}/replay.mp4"
+                image_path = Path(capture["evidence"]["stillPath"])
+                audio_path = Path(capture["evidence"]["audioPath"])
+                replay_path = Path(capture["replay"]["videoPath"])
+                if image_path.is_file():
+                    media[image_relative] = image_path.resolve()
+                    image_url = f"/preview/{token}/media/{image_relative}"
+                if audio_path.is_file():
+                    media[audio_relative] = audio_path.resolve()
+                    audio_url = f"/preview/{token}/media/{audio_relative}"
+                if replay_path.is_file():
+                    media[replay_relative] = replay_path.resolve()
+                    replay_url = f"/preview/{token}/media/{replay_relative}"
+            if not image_url or not audio_url or not replay_url:
+                issues.append({
+                    "code": f"MISSING_MEDIA_{index}",
+                    "severity": "error",
+                    "message": f"Round {index} preview media is missing or unavailable.",
+                })
+            rounds.append({
+                "position": index,
+                "operatorId": operator_id if isinstance(operator_id, str) else None,
+                "evidenceImageUrl": image_url,
+                "videoUrl": audio_url,
+                "replayVideoUrl": replay_url,
+                "listenerPos": source.get("listenerPos") if position_is_valid(source.get("listenerPos")) else None,
+                "operatorStartPos": source.get("operatorStartPos") if position_is_valid(source.get("operatorStartPos")) else None,
+                "targetPos": source.get("targetPos") if position_is_valid(source.get("targetPos")) else None,
+            })
+        while len(rounds) < 3:
+            index = len(rounds) + 1
+            issues.append({
+                "code": f"INCOMPLETE_ROUND_{index}",
+                "severity": "error",
+                "message": f"Round {index} is missing from this draft.",
+            })
+            rounds.append({
+                "position": index, "operatorId": None, "evidenceImageUrl": None, "videoUrl": None,
+                "replayVideoUrl": None, "listenerPos": None,
+                "operatorStartPos": None, "targetPos": None,
+            })
+        contract = {
+            "kind": "r6-soundle-preview",
+            "schemaVersion": PREVIEW_SCHEMA_VERSION,
+            "scoringVersion": int(scoring["version"]),
+            "session": {"id": token, "expiresAt": iso_utc(expires_at)},
+            "displayDate": display_date,
+            "set": {
+                "id": item["id"],
+                "version": item["version"],
+                "mapAssetVersion": item["mapAssetVersion"],
+            },
+            "assetVersion": catalog["assetVersion"],
+            "issues": issues,
+            "puzzle": {
+                "date": display_date,
+                "mapName": item.get("mapName") or item["mapSlug"].replace("-", " ").title(),
+                "mapSlug": item["mapSlug"],
+                "rounds": rounds[:3],
+            },
+        }
+        return PreviewSession(token, item["id"], item["version"], expires_at, contract, media)
+
+    def create(
+        self,
+        set_id: str,
+        display_date: str,
+        expected_version: int | None = None,
+    ) -> PreviewSession:
+        item = self.app.store.get_set(set_id)
+        if not item:
+            raise KeyError("Set not found")
+        if expected_version is not None and item["version"] != expected_version:
+            raise ValueError(
+                f"Draft version changed from {expected_version} to {item['version']}; save and preview again"
+            )
+        token = secrets.token_urlsafe(32)
+        expires_at = self.now() + self.ttl
+        session = self._snapshot(item, display_date, token, expires_at)
+        with self._lock:
+            self._items[token] = session
+        return session
+
+    def get(self, token: str, allow_expired: bool = False) -> PreviewSession:
+        with self._lock:
+            session = self._items.get(token)
+        if not session:
+            raise KeyError("Preview session was not found")
+        if not allow_expired and session.expires_at <= self.now():
+            raise PreviewExpiredError("This preview session expired. Open a new preview from Studio.")
+        return session
+
+
 @dataclass
 class App:
     store: Store
@@ -611,6 +784,7 @@ class App:
     def __post_init__(self) -> None:
         self.import_roots = tuple(root.expanduser().resolve() for root in self.import_roots)
         self.importer = DailySetImporter(self.store, self.import_roots, lambda: self.catalog)
+        self.previews = PreviewSessions(self)
 
     def import_single_capture(self, manifest_path: Path) -> dict[str, Any]:
         try:
@@ -654,7 +828,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return value
 
-    def _serve_file(self, root: Path, relative: str) -> None:
+    def _serve_file(self, root: Path, relative: str, *, no_store: bool = False) -> None:
         root = root.resolve()
         candidate = (root / unquote(relative).lstrip("/")).resolve()
         try:
@@ -672,9 +846,63 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store" if candidate.suffix in {".html", ".js"} else "public, max-age=3600")
+        self.send_header(
+            "Cache-Control",
+            "no-store" if no_store or candidate.suffix in {".html", ".js", ".mjs"}
+            else "public, max-age=3600",
+        )
         self.end_headers()
         self.wfile.write(body)
+
+    @staticmethod
+    def _preview_parts(path: str) -> tuple[str, str] | None:
+        parts = path.strip("/").split("/")
+        if len(parts) < 2 or parts[0] != "preview":
+            return None
+        return parts[1], "/".join(parts[2:])
+
+    @staticmethod
+    def _preview_asset_path(relative: str) -> str | None:
+        decoded = relative
+        for _ in range(3):
+            expanded = unquote(decoded)
+            if expanded == decoded:
+                break
+            decoded = expanded
+        decoded = decoded.replace("\\", "/").lstrip("/")
+        parts = decoded.split("/")
+        if "%" in decoded or any(part in {"", ".", ".."} for part in parts):
+            return None
+        if decoded in GAME_PREVIEW_ASSET_FILES or decoded.startswith(GAME_PREVIEW_ASSET_PREFIXES):
+            return decoded
+        return None
+
+    def _serve_preview(self, token: str, relative: str) -> None:
+        if relative in {"", "index.html"}:
+            self.app.previews.get(token, allow_expired=True)
+            self._serve_file(self.app.game_repo, "index.html", no_store=True)
+            return
+        if relative == "api/preview":
+            self._json(self.app.previews.get(token).contract)
+            return
+        if relative.startswith("assets/"):
+            asset = self._preview_asset_path(relative[len("assets/"):])
+            if not asset:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.app.previews.get(token, allow_expired=True)
+            self._serve_file(self.app.game_repo / "assets", asset, no_store=True)
+            return
+        if relative.startswith("media/"):
+            session = self.app.previews.get(token)
+            media_relative = relative[len("media/"):]
+            candidate = session.media.get(media_relative)
+            if not candidate or not candidate.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self._serve_file(candidate.parent, candidate.name, no_store=True)
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def _media_path(self, relative: str) -> Path | None:
         if "/" not in relative:
@@ -693,7 +921,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         try:
-            if path == "/api/health":
+            preview = self._preview_parts(path)
+            if preview:
+                self._serve_preview(*preview)
+            elif path == "/api/health":
                 self._json({"ok": True, "time": iso_utc()})
             elif path == "/api/catalog":
                 self._json(self.app.catalog)
@@ -720,6 +951,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 relative = "index.html" if path == "/" else path
                 self._serve_file(STUDIO_DIR, relative)
+        except PreviewExpiredError as error:
+            self._json({"error": error.args[0]}, HTTPStatus.GONE)
+        except KeyError as error:
+            self._json({"error": error.args[0]}, HTTPStatus.NOT_FOUND)
         except Exception as error:
             self._json({"error": str(error)}, 500)
 
@@ -729,6 +964,32 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if path == "/api/sets":
                 self._json(self.app.store.save_set(payload), 201)
+            elif path == "/api/previews":
+                requested_schema = int(payload.get("schemaVersion", PREVIEW_SCHEMA_VERSION))
+                if requested_schema != PREVIEW_SCHEMA_VERSION:
+                    self._json(
+                        {
+                            "error": f"Studio supports preview schema v{PREVIEW_SCHEMA_VERSION}, not v{requested_schema}",
+                            "supportedSchemaVersions": [PREVIEW_SCHEMA_VERSION],
+                        },
+                        HTTPStatus.UPGRADE_REQUIRED,
+                    )
+                    return
+                session = self.app.previews.create(
+                    str(payload.get("setId", "")),
+                    str(payload.get("displayDate") or date.today().isoformat()),
+                    int(payload["setVersion"]) if payload.get("setVersion") is not None else None,
+                )
+                self._json(
+                    {
+                        "sessionId": session.token,
+                        "schemaVersion": PREVIEW_SCHEMA_VERSION,
+                        "expiresAt": iso_utc(session.expires_at),
+                        "url": f"/preview/{session.token}/",
+                        "issues": session.contract["issues"],
+                    },
+                    HTTPStatus.CREATED,
+                )
             elif path == "/api/captures/import":
                 self._json(self.app.import_single_capture(Path(str(payload.get("manifestPath", "")))), 201)
             elif path == "/api/imports/scan":

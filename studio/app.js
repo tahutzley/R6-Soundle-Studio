@@ -1198,6 +1198,33 @@ $("#clearRound").addEventListener("click", () => {
   scheduleDraftSave();
 });
 $("#approveSet").addEventListener("click", () => saveSet("approved").catch((error) => toast(error.message)));
+$("#previewSet").addEventListener("click", async () => {
+  if (!state.current) return;
+  const previewWindow = window.open("about:blank", "_blank");
+  try {
+    if (autoSaveTimer) await persistDraft();
+    await autoSavePromise.catch(() => {});
+    const result = await api("/api/previews", {
+      method: "POST",
+      body: JSON.stringify({
+        schemaVersion: 1,
+        setId: state.current.id,
+        setVersion: state.current.version,
+        displayDate: $("#previewDate").value,
+      }),
+    });
+    if (!previewWindow) {
+      toast("Allow pop-ups for Studio, then select Preview again");
+      return;
+    }
+    previewWindow.location.replace(new URL(result.url, location.href).href);
+    const errors = result.issues.filter((issue) => issue.severity === "error").length;
+    toast(errors ? `Preview opened with ${errors} issue${errors === 1 ? "" : "s"}` : "Preview opened in an isolated session");
+  } catch (error) {
+    previewWindow?.close();
+    toast(error.message);
+  }
+});
 function openImportDialog(targetSetId = null) {
   state.importTargetSetId = targetSetId;
   $("#captureDialog").showModal();
@@ -1293,7 +1320,9 @@ async function start() {
   try {
     state.catalog = await loadWideCatalog();
     fillMapSelect();
-    $("#releaseDate").value = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+    const easternDate = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+    $("#releaseDate").value = easternDate;
+    $("#previewDate").value = easternDate;
     await refreshData();
     $("#status").textContent = `${state.catalog.maps.length} maps · ${state.catalog.operators.length} operators`;
   } catch (error) {

@@ -102,6 +102,9 @@ h2 { margin-bottom: 0; font-size: 1.22rem; line-height: 1.05; }
 .title-field input { font-size: .98rem; font-weight: 700; }
 .editor-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
 .editor-actions button { min-height: 36px; padding: .45rem .65rem; border-radius: 0; }
+.preview-date-field { width: 142px; }
+.preview-date-field span { font-size: .68rem; }
+.preview-date-field input { min-height: 36px; padding: .4rem .5rem; }
 .round-tabs { display: flex; align-self: stretch; gap: 0; margin: 0; }
 .round-tabs button { display: grid; grid-template-columns: 28px auto; grid-template-rows: auto auto; column-gap: 7px; align-items: center; min-width: 122px; padding: .42rem .62rem .48rem; border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: transparent; color: var(--muted); text-align: left; }
 .round-tabs button:hover { background: #ffffff08; color: var(--text); }

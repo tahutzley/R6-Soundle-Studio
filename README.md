@@ -181,10 +181,30 @@ Existing Studio databases migrate additively on startup. Capture rows gain a
 content fingerprint, schema/processing versions, map-set/slot identity, and an
 import-source label; existing rows and local owner state are preserved.
 
+## Preview a draft in the real game
+
+Choose a preview date on an open draft and select **Preview**. Studio saves the
+current draft, snapshots that exact set version, and opens the game repository's
+real `index.html` and JavaScript modules in a new tab. The preview date may be in
+the future; this does not weaken the public game's future-date check.
+
+Preview URLs contain a random session identifier and expire after 30 minutes.
+Studio serves only the game index, allowlisted browser assets, and the listener
+still/audio plus replay attached to that immutable session snapshot. Preview play state is stored under one
+session-specific key, while accounts, leaderboards, and statistics are disabled.
+Replay clears only that key. Incomplete rounds, missing media, stale map assets,
+expired sessions, and incompatible contract/scoring versions are shown as
+explicit preview failures or warnings. Closing a preview never edits its draft.
+
+The game repository owns `contracts/preview-v1.schema.json`. Studio vendors the
+supported contract under `schemas/` with source revision and canonical hash
+metadata; the preview bridge test rejects unreviewed drift.
+
 ## Run checks
 
 ```powershell
 python -m unittest discover -s tests -v
+python -m unittest tests.test_preview_bridge -v
 python -m unittest tests.test_studio tests.test_daily_set_import -v
 python -m unittest tests.test_process_capture tests.test_capture_contract -v
 python studio_server.py --self-test
