@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "not-a-stable-capture-id",
+  "source": {
+    "mapSet": "7-clubhouse",
+    "mapSlug": "clubhouse",
+    "setNumber": 7,
+    "slot": 3,
+    "listenerSourceName": "listener.mp4",
+    "runnerSourceName": "runner.mp4"
+  },
+  "evidence": {
+    "stillPath": "../listener.jpg",
+    "audioPath": "listener.m4a"
+  }
+}

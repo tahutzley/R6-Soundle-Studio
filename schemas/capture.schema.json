@@ -1,31 +1,122 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://r6soundle.example/schemas/capture.schema.json",
-  "title": "R6 Soundle Processed Capture",
+  "$id": "https://r6soundle.example/schemas/capture-v1.schema.json",
+  "title": "R6 Soundle Processed Capture v1",
   "type": "object",
-  "required": ["id", "status", "evidence", "replay", "alignment"],
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "source", "evidence", "replay", "alignment", "durationSeconds", "media", "processing", "review"],
   "properties": {
-    "id": { "type": "string", "minLength": 1 },
-    "status": { "enum": ["processing", "needs_review", "approved", "failed"] },
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*/[123]$" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mapSet", "mapSlug", "setNumber", "slot", "listenerSourceName", "runnerSourceName"],
+      "properties": {
+        "mapSet": { "type": "string", "pattern": "^[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "mapSlug": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "setNumber": { "type": "integer", "minimum": 1 },
+        "slot": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "listenerSourceName": { "type": "string", "minLength": 1 },
+        "runnerSourceName": { "type": "string", "minLength": 1 },
+        "operatorId": { "type": "string", "minLength": 1 },
+        "recordingSessionId": { "type": "string", "minLength": 1 }
+      }
+    },
     "evidence": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["stillPath", "audioPath"],
       "properties": {
-        "stillPath": { "type": "string" },
-        "audioPath": { "type": "string" }
+        "stillPath": { "type": "string", "minLength": 1 },
+        "audioPath": { "type": "string", "minLength": 1 }
       }
     },
     "replay": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["videoPath"],
-      "properties": { "videoPath": { "type": "string" } }
+      "properties": { "videoPath": { "type": "string", "minLength": 1 } }
     },
     "alignment": {
       "type": "object",
-      "required": ["runnerOffsetMs", "confidence"],
+      "additionalProperties": false,
+      "required": ["runnerOffsetMs", "confidence", "correlationMethod", "measuredAt"],
       "properties": {
         "runnerOffsetMs": { "type": "number" },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "correlationMethod": { "type": "string", "minLength": 1 },
+        "measuredAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "durationSeconds": { "type": "number", "exclusiveMinimum": 0 },
+    "media": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "byteSize", "sha256", "mimeType", "codec", "container"],
+        "properties": {
+          "kind": { "enum": ["evidence_still", "evidence_audio", "replay_video"] },
+          "path": { "type": "string", "minLength": 1 },
+          "byteSize": { "type": "integer", "minimum": 1 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "mimeType": { "enum": ["image/jpeg", "audio/mp4", "video/mp4"] },
+          "durationSeconds": { "type": "number", "exclusiveMinimum": 0 },
+          "codec": { "type": "string", "minLength": 1 },
+          "container": { "type": "string", "minLength": 1 },
+          "width": { "type": "integer", "minimum": 1 },
+          "height": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "processing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["processingVersion", "processorVersion", "settings", "processedAt", "sourceFingerprints"],
+      "properties": {
+        "processingVersion": { "type": "integer", "minimum": 1 },
+        "processorVersion": { "type": "string", "minLength": 1 },
+        "settings": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "alignment": { "enum": ["audio-envelope-v1", "manual-offset", "legacy-unavailable"] },
+            "maxOffsetSeconds": { "type": "number", "minimum": 0 },
+            "requestedDurationSeconds": { "type": "number", "exclusiveMinimum": 0 },
+            "audioBitrate": { "type": "string", "pattern": "^[1-9][0-9]*k$" },
+            "videoCrf": { "type": "integer", "minimum": 0, "maximum": 51 },
+            "videoPreset": { "enum": ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"] }
+          }
+        },
+        "processedAt": { "type": "string", "format": "date-time" },
+        "sourceFingerprints": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "name", "byteSize", "sha256"],
+            "properties": {
+              "role": { "enum": ["listener", "runner"] },
+              "name": { "type": "string", "minLength": 1 },
+              "byteSize": { "type": "integer", "minimum": 1 },
+              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["needs_review", "approved"] },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "note": { "type": "string", "maxLength": 1000 }
       }
     }
   }

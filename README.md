@@ -99,6 +99,13 @@ Each pair writes exactly three files. The example above is written to
 - `listener.m4a` — the listener audio used by the game;
 - `replay.mp4` — the aligned runner POV with listener audio.
 
+The processor builds these files in a temporary sibling directory, probes and
+hashes them, validates the version-1 contract in `schemas\capture.schema.json`,
+and commits `capture.json` last. A failed command therefore never leaves an
+importable partial round. Existing output is never overwritten by default.
+Use `--replace` to reprocess intentionally; the prior directory is retained as
+a timestamped sibling backup after the atomic promotion succeeds.
+
 To process one explicitly selected pair, use:
 
 ```powershell
@@ -111,11 +118,37 @@ Raw inputs are preserved by default. After reviewing all outputs, pass
 `--remove-raw` to remove ordinary source MP4s. Recordings inside ZIP archives
 cannot be removed by the processor.
 
+## Index legacy processed captures
+
+The legacy indexer validates the complete map-set/slot tree before it writes
+anything. Its default and explicit `--dry-run` modes only report missing
+manifests and hash the existing bytes:
+
+```powershell
+python processor\index_captures.py --root "daily sets" --dry-run
+```
+
+After backing up and reviewing a real daily-set directory, opt in with
+`--write-manifests`. Write mode probes existing media and adds only missing
+`capture.json` files; it never re-encodes, renames, or deletes media. Conflicting
+manifests, partial rounds, extra files, symlinks, duplicate identities, and
+noncanonical directory names stop the entire preflight. Repeating a successful
+index is a no-op.
+
+Do not run write mode against owner media until its separate backup has been
+confirmed. The automated fixture check is safe:
+
+```powershell
+python processor\index_captures.py --root tests\fixtures\legacy-daily-sets --dry-run
+```
+
 ## Run checks
 
 ```powershell
 python -m unittest discover -s tests -v
+python -m unittest tests.test_process_capture tests.test_capture_contract -v
 python processor\process_capture.py --self-test
+python processor\index_captures.py --root tests\fixtures\legacy-daily-sets --dry-run
 gitleaks dir . --no-banner --redact
 ```
 

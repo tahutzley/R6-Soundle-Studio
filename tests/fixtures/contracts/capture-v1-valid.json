@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "id": "7-clubhouse/3",
+  "source": {
+    "mapSet": "7-clubhouse",
+    "mapSlug": "clubhouse",
+    "setNumber": 7,
+    "slot": 3,
+    "listenerSourceName": "7-clubhouse-3-listener.mp4",
+    "runnerSourceName": "7-clubhouse-3-runner.mp4",
+    "operatorId": "sledge",
+    "recordingSessionId": "fixture-session"
+  },
+  "evidence": {
+    "stillPath": "listener.jpg",
+    "audioPath": "listener.m4a"
+  },
+  "replay": {
+    "videoPath": "replay.mp4"
+  },
+  "alignment": {
+    "runnerOffsetMs": 80,
+    "confidence": 0.91,
+    "correlationMethod": "audio-envelope-v1",
+    "measuredAt": "2026-08-31T20:00:00Z"
+  },
+  "durationSeconds": 12.5,
+  "media": [
+    {
+      "kind": "evidence_still",
+      "path": "listener.jpg",
+      "byteSize": 100,
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mimeType": "image/jpeg",
+      "codec": "mjpeg",
+      "container": "image2",
+      "width": 1920,
+      "height": 1080
+    },
+    {
+      "kind": "evidence_audio",
+      "path": "listener.m4a",
+      "byteSize": 200,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mimeType": "audio/mp4",
+      "durationSeconds": 12.5,
+      "codec": "aac",
+      "container": "mov,mp4,m4a,3gp,3g2,mj2"
+    },
+    {
+      "kind": "replay_video",
+      "path": "replay.mp4",
+      "byteSize": 300,
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "mimeType": "video/mp4",
+      "durationSeconds": 12.5,
+      "codec": "h264",
+      "container": "mov,mp4,m4a,3gp,3g2,mj2",
+      "width": 1920,
+      "height": 1080
+    }
+  ],
+  "processing": {
+    "processingVersion": 1,
+    "processorVersion": "r6-soundle-capture/1",
+    "settings": {
+      "alignment": "audio-envelope-v1",
+      "maxOffsetSeconds": 3,
+      "audioBitrate": "192k",
+      "videoCrf": 18,
+      "videoPreset": "medium"
+    },
+    "processedAt": "2026-08-31T20:00:15Z",
+    "sourceFingerprints": [
+      {
+        "role": "listener",
+        "name": "7-clubhouse-3-listener.mp4",
+        "byteSize": 400,
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      {
+        "role": "runner",
+        "name": "7-clubhouse-3-runner.mp4",
+        "byteSize": 500,
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ]
+  },
+  "review": {
+    "status": "needs_review"
+  }
+}

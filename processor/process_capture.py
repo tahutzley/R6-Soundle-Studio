@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import math
 import os
 import re
@@ -12,10 +14,23 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import uuid
 import zipfile
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
+
+from capture_contract import (
+    CAPTURE_SCHEMA_VERSION,
+    MEDIA_BY_KIND,
+    PROCESSING_VERSION,
+    PROCESSOR_VERSION,
+    CaptureValidationError,
+    file_fingerprint,
+    hash_file,
+    utc_now,
+    validate_capture,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +42,10 @@ CAPTURE_NAME = re.compile(
     r"(?P<slot>[123])-(?P<role>listener|runner)\.mp4$",
     re.IGNORECASE,
 )
+VIDEO_PRESETS = {
+    "ultrafast", "superfast", "veryfast", "faster", "fast",
+    "medium", "slow", "slower", "veryslow",
+}
 
 
 class ProcessingError(RuntimeError):
@@ -191,6 +210,135 @@ def probe_duration(path: Path, ffprobe: str) -> float:
         raise ProcessingError(f"Could not read duration for {path}") from error
 
 
+def probe_media(path: Path, kind: str, ffprobe: str) -> dict[str, object]:
+    """Return normalized manifest metadata for one canonical output."""
+    raw = run(
+        [
+            ffprobe,
+            "-v", "error",
+            "-show_entries", "format=format_name,duration:stream=codec_type,codec_name,width,height,duration",
+            "-of", "json",
+            str(path),
+        ],
+        capture=True,
+    )
+    try:
+        probe = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProcessingError(f"Could not parse media metadata for {path.name}") from error
+    streams = probe.get("streams", [])
+    stream_type = "audio" if kind == "evidence_audio" else "video"
+    stream = next((item for item in streams if item.get("codec_type") == stream_type), None)
+    if not stream or not stream.get("codec_name"):
+        raise ProcessingError(f"{path.name} has no usable {stream_type} stream")
+    if kind == "replay_video" and not any(item.get("codec_type") == "audio" for item in streams):
+        raise ProcessingError("replay.mp4 has no listener audio stream")
+    format_info = probe.get("format", {})
+    container = str(format_info.get("format_name") or "").strip()
+    if not container:
+        raise ProcessingError(f"{path.name} has no recognized container")
+    canonical_name, mime_type = MEDIA_BY_KIND[kind]
+    item: dict[str, object] = {
+        "kind": kind,
+        "path": canonical_name,
+        "byteSize": path.stat().st_size,
+        "sha256": hash_file(path),
+        "mimeType": mime_type,
+        "codec": str(stream["codec_name"]),
+        "container": container,
+    }
+    if kind != "evidence_still":
+        raw_duration = format_info.get("duration") or stream.get("duration")
+        try:
+            media_duration = float(raw_duration)
+        except (TypeError, ValueError) as error:
+            raise ProcessingError(f"{path.name} has no valid duration") from error
+        if not math.isfinite(media_duration) or media_duration <= 0:
+            raise ProcessingError(f"{path.name} has no positive duration")
+        item["durationSeconds"] = media_duration
+    if kind in {"evidence_still", "replay_video"}:
+        try:
+            width = int(stream.get("width", 0))
+            height = int(stream.get("height", 0))
+        except (TypeError, ValueError) as error:
+            raise ProcessingError(f"{path.name} has invalid dimensions") from error
+        if width <= 0 or height <= 0:
+            raise ProcessingError(f"{path.name} has no positive dimensions")
+        item.update(width=width, height=height)
+    return item
+
+
+def write_manifest_atomic(output: Path, manifest: dict[str, object]) -> None:
+    temporary = output / "capture.json.tmp"
+    payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    with temporary.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, output / "capture.json")
+    fsync_directory(output)
+
+
+def fsync_file(path: Path) -> None:
+    """Flush completed output bytes where the host filesystem supports it."""
+    # Windows requires a writable handle for FlushFileBuffers even though this
+    # operation does not modify the completed file.
+    with path.open("r+b") as stream:
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
+def capture_lock(parent: Path, slot: int):
+    lock = parent / f".{slot}.processing.lock"
+    try:
+        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as error:
+        raise ProcessingError(f"Another process is already working on {parent.name} slot {slot}") from error
+    try:
+        os.write(descriptor, f"pid={os.getpid()}\n".encode("ascii"))
+        os.close(descriptor)
+        yield
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        lock.unlink(missing_ok=True)
+
+
+def promote_capture(temporary: Path, target: Path, replace: bool) -> Path | None:
+    """Promote a complete sibling directory, restoring the old target on failure."""
+    backup: Path | None = None
+    if target.exists():
+        if not replace:
+            raise ProcessingError(f"Output already exists; use --replace to reprocess: {target}")
+        backup = target.with_name(
+            f".{target.name}.backup-{utc_now().replace(':', '').replace('+', '_')}-{uuid.uuid4().hex[:8]}"
+        )
+        os.replace(target, backup)
+    try:
+        os.replace(temporary, target)
+    except BaseException:
+        if backup is not None and backup.exists() and not target.exists():
+            os.replace(backup, target)
+        raise
+    return backup
+
+
 def decode_mono(path: Path, ffmpeg: str) -> array:
     raw = run(
         [ffmpeg, "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "-"],
@@ -259,7 +407,60 @@ def process_pair(
     ffprobe: str,
 ) -> Path:
     print(f"\nProcessing {pair.name.mapset} slot {pair.name.slot}")
-    with tempfile.TemporaryDirectory(prefix="r6-soundle-pair-") as temporary:
+    resolved_output_root = output_root.expanduser().resolve()
+    resolved_output_root.mkdir(parents=True, exist_ok=True)
+    requested_mapset = resolved_output_root / pair.name.mapset
+    if requested_mapset.is_symlink():
+        raise ProcessingError(f"Output map-set directory may not be a symlink: {requested_mapset}")
+    mapset_parent = requested_mapset.resolve()
+    try:
+        mapset_parent.relative_to(resolved_output_root)
+    except ValueError as error:
+        raise ProcessingError("Output map-set directory escapes the output root") from error
+    mapset_parent.mkdir(parents=True, exist_ok=True)
+    output = mapset_parent / str(pair.name.slot)
+    with capture_lock(mapset_parent, pair.name.slot):
+        if output.exists() and not args.replace:
+            raise ProcessingError(f"Output already exists; use --replace to reprocess: {output}")
+        temporary_output = Path(
+            tempfile.mkdtemp(prefix=f".{pair.name.slot}.processing-", dir=mapset_parent)
+        )
+        try:
+            result = _process_pair_into(
+                pair, temporary_output, args, ffmpeg, ffprobe
+            )
+            validate_capture(result, temporary_output)
+            backup = promote_capture(temporary_output, output, args.replace)
+        except (CaptureValidationError, OSError) as error:
+            shutil.rmtree(temporary_output, ignore_errors=True)
+            if isinstance(error, CaptureValidationError):
+                raise ProcessingError(f"Capture validation failed: {error}") from error
+            raise ProcessingError(f"Could not atomically publish capture: {error}") from error
+        except BaseException:
+            shutil.rmtree(temporary_output, ignore_errors=True)
+            raise
+
+    if args.remove_raw:
+        if pair.listener.archive_entry is not None or pair.runner.archive_entry is not None:
+            raise ProcessingError("--remove-raw cannot remove recordings stored inside ZIP archives")
+        pair.listener.path.resolve().unlink()
+        pair.runner.path.resolve().unlink()
+        print("Removed both raw recordings.")
+    if backup is not None:
+        print(f"Previous output retained as backup: {backup}")
+    print(f"Daily-set capture ready: {output}")
+    return output
+
+
+def _process_pair_into(
+    pair: CapturePair,
+    output: Path,
+    args: argparse.Namespace,
+    ffmpeg: str,
+    ffprobe: str,
+) -> dict[str, object]:
+    """Build and validate a capture inside a disposable, non-canonical directory."""
+    with tempfile.TemporaryDirectory(prefix="r6-soundle-sources-") as temporary:
         listener = pair.listener.materialize(Path(temporary))
         runner = pair.runner.materialize(Path(temporary))
         if not listener.is_file() or not runner.is_file():
@@ -267,8 +468,6 @@ def process_pair(
         if listener == runner:
             raise ProcessingError("Listener and runner recordings must be different files")
 
-        output = (output_root / pair.name.mapset / str(pair.name.slot)).resolve()
-        output.mkdir(parents=True, exist_ok=True)
         listener_duration = probe_duration(listener, ffprobe)
         runner_duration = probe_duration(runner, ffprobe)
 
@@ -277,9 +476,12 @@ def process_pair(
             offset_seconds, confidence, _correlation = estimate_offset(
                 decode_mono(listener, ffmpeg), decode_mono(runner, ffmpeg), args.max_offset
             )
+            correlation_method = "audio-envelope-v1"
         else:
             offset_seconds = args.offset_ms / 1000
             confidence = 1.0
+            correlation_method = "manual-offset"
+        measured_at = utc_now()
 
         listener_start = max(0.0, -offset_seconds)
         runner_start = max(0.0, offset_seconds)
@@ -300,11 +502,13 @@ def process_pair(
             ffmpeg, "-y", "-v", "error", "-ss", f"{still_time:.6f}", "-i", str(listener),
             "-frames:v", "1", "-q:v", "2", str(still_path),
         ])
+        _failure_after(args, "evidence_still")
         run([
             ffmpeg, "-y", "-v", "error", "-ss", f"{listener_start:.6f}", "-i", str(listener),
             "-t", f"{duration:.6f}", "-vn", "-c:a", "aac", "-b:a", args.audio_bitrate,
             "-movflags", "+faststart", str(audio_path),
         ])
+        _failure_after(args, "evidence_audio")
         run([
             ffmpeg, "-y", "-v", "error", "-ss", f"{runner_start:.6f}", "-i", str(runner),
             "-ss", f"{listener_start:.6f}", "-i", str(listener), "-t", f"{duration:.6f}",
@@ -312,19 +516,72 @@ def process_pair(
             "-crf", str(args.crf), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", args.audio_bitrate,
             "-movflags", "+faststart", "-shortest", str(replay_path),
         ])
+        _failure_after(args, "replay_video")
 
         for candidate in (still_path, audio_path, replay_path):
             if not candidate.is_file() or candidate.stat().st_size == 0:
                 raise ProcessingError(f"FFmpeg did not create {candidate.name}")
+            fsync_file(candidate)
+        fsync_directory(output)
+        media = [
+            probe_media(still_path, "evidence_still", ffprobe),
+            probe_media(audio_path, "evidence_audio", ffprobe),
+            probe_media(replay_path, "replay_video", ffprobe),
+        ]
+        set_number_text, map_slug = pair.name.mapset.split("-", 1)
+        settings: dict[str, object] = {
+            "alignment": correlation_method,
+            "maxOffsetSeconds": args.max_offset,
+            "audioBitrate": args.audio_bitrate,
+            "videoCrf": args.crf,
+            "videoPreset": args.preset,
+        }
+        if args.duration is not None:
+            settings["requestedDurationSeconds"] = args.duration
+        manifest: dict[str, object] = {
+            "schemaVersion": CAPTURE_SCHEMA_VERSION,
+            "id": f"{pair.name.mapset}/{pair.name.slot}",
+            "source": {
+                "mapSet": pair.name.mapset,
+                "mapSlug": map_slug,
+                "setNumber": int(set_number_text),
+                "slot": pair.name.slot,
+                "listenerSourceName": pair.listener.name,
+                "runnerSourceName": pair.runner.name,
+            },
+            "evidence": {"stillPath": "listener.jpg", "audioPath": "listener.m4a"},
+            "replay": {"videoPath": "replay.mp4"},
+            "alignment": {
+                "runnerOffsetMs": offset_seconds * 1000,
+                "confidence": confidence,
+                "correlationMethod": correlation_method,
+                "measuredAt": measured_at,
+            },
+            "durationSeconds": duration,
+            "media": media,
+            "processing": {
+                "processingVersion": PROCESSING_VERSION,
+                "processorVersion": PROCESSOR_VERSION,
+                "settings": settings,
+                "processedAt": utc_now(),
+                "sourceFingerprints": [
+                    file_fingerprint(listener, role="listener", name=pair.listener.name),
+                    file_fingerprint(runner, role="runner", name=pair.runner.name),
+                ],
+            },
+            "review": {"status": "needs_review"},
+        }
+        validate_capture(manifest, output)
+        _failure_after(args, "validated_media")
+        write_manifest_atomic(output, manifest)
+        _failure_after(args, "manifest")
+        return manifest
 
-        if args.remove_raw:
-            # Removal is last, after all three outputs succeeded.
-            listener.unlink()
-            runner.unlink()
-            print("Removed both raw recordings.")
 
-        print(f"Daily-set assets ready: {output}")
-        return output
+def _failure_after(args: argparse.Namespace, stage: str) -> None:
+    """Private deterministic fault hook used by the atomicity test matrix."""
+    if getattr(args, "failure_after", None) == stage:
+        raise ProcessingError(f"Injected failure after {stage}")
 
 
 def self_test() -> None:
@@ -366,7 +623,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--duration", type=float)
     result.add_argument("--audio-bitrate", default="192k")
     result.add_argument("--crf", type=int, default=18)
-    result.add_argument("--preset", default="medium")
+    result.add_argument("--preset", choices=sorted(VIDEO_PRESETS), default="medium")
+    result.add_argument(
+        "--replace",
+        action="store_true",
+        help="Atomically replace an existing capture and retain it as a timestamped backup",
+    )
     result.add_argument("--remove-raw", action="store_true")
     result.add_argument(
         "--validate-only",
@@ -391,6 +653,18 @@ if __name__ == "__main__":
                 argument_parser.error("--listener and --runner must be supplied together")
             if arguments.validate_only and arguments.remove_raw:
                 argument_parser.error("--validate-only and --remove-raw cannot be used together")
+            if not math.isfinite(arguments.max_offset) or arguments.max_offset < 0:
+                argument_parser.error("--max-offset must be a finite non-negative number")
+            if arguments.duration is not None and (
+                not math.isfinite(arguments.duration) or arguments.duration <= 0
+            ):
+                argument_parser.error("--duration must be a finite positive number")
+            if arguments.offset_ms is not None and not math.isfinite(arguments.offset_ms):
+                argument_parser.error("--offset-ms must be finite")
+            if re.fullmatch(r"[1-9]\d*k", arguments.audio_bitrate) is None:
+                argument_parser.error("--audio-bitrate must look like 192k")
+            if not 0 <= arguments.crf <= 51:
+                argument_parser.error("--crf must be between 0 and 51")
 
             if arguments.input:
                 paths, used_zip = collect_inputs(arguments.input)
