@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
@@ -160,11 +160,13 @@ class StudioPublisher:
         catalog: Mapping[str, Any],
         scoring_version: int,
         client: PublisherClientProtocol,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
         self.catalog = catalog
         self.scoring_version = scoring_version
         self.client = client
+        self.now = now or (lambda: datetime.now(ZoneInfo("America/New_York")))
 
     def _bundle(
         self,
@@ -377,7 +379,7 @@ class StudioPublisher:
         reason = reason.strip()
         if not reason:
             raise ValueError("A reason is required to stop a scheduled release")
-        if parsed_date <= datetime.now(ZoneInfo("America/New_York")).date():
+        if parsed_date <= self.now().astimezone(ZoneInfo("America/New_York")).date():
             raise ValueError("Only a future release can be stopped from Studio")
         attempt = self.latest_release_attempt(release_date)
         if not attempt:

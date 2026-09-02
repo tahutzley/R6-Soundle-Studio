@@ -166,7 +166,7 @@ class StudioPublishClientTests(unittest.TestCase):
             client = InProcessPublisherClient(
                 TestClient(game, headers={"Authorization": f"Bearer {PUBLISHER_TOKEN}"})
             )
-            publisher = StudioPublisher(store, catalog, 5, client)
+            publisher = StudioPublisher(store, catalog, 5, client, now=lambda: now)
             with self.assertRaises(PublishInterrupted):
                 publisher.publish("2026-09-02", approved["id"], interrupt_after=interrupt_after)
             interrupted = publisher.list_attempts()[0]
@@ -178,7 +178,7 @@ class StudioPublishClientTests(unittest.TestCase):
                 ).fetchone()[0]
                 self.assertNotIn('"upload"', persisted)
 
-            restarted = StudioPublisher(store, catalog, 5, client)
+            restarted = StudioPublisher(store, catalog, 5, client, now=lambda: now)
             completed = restarted.publish("2026-09-02", approved["id"])
             self.assertEqual(completed["state"], "scheduled")
             self.assertEqual(client.prepare_calls, 1)
