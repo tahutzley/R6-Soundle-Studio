@@ -13,14 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out Studio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: R6-Soundle-Studio
       - name: Check out game contract authority
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.repository_owner }}/R6-Soundle
           path: R6-Soundle
+          token: ${{ secrets.R6_SOUNDLE_READ_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

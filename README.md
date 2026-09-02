@@ -285,6 +285,12 @@ python processor\index_captures.py --root tests\fixtures\legacy-daily-sets --dry
 gitleaks dir . --no-banner --redact
 ```
 
+The Studio CI also checks out the private `R6-Soundle` contract authority. Add
+an Actions secret named `R6_SOUNDLE_READ_TOKEN` in the Studio repository. It
+must be a fine-grained personal access token or GitHub App token with
+**Contents: Read-only** access to the `R6-Soundle` repository only. Do not use
+the default `GITHUB_TOKEN`: it cannot read a separate private repository.
+
 The secret scan excludes only the exact ignored local database, recorder
 configuration, raw video, and generated-media paths. The repository safety
 test separately prevents those paths from entering Git, while CI scans both
