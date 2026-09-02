@@ -6,8 +6,11 @@ of the public game repository.
 
 The current milestone is a local-first studio:
 
-- A set always contains exactly three neutral slots: Round 1, Round 2, and
-  Round 3. Difficulty is not part of the model.
+- The Studio library separates three-round daily sets from one-round How to
+  Play examples. Difficulty is not part of either model.
+- How to Play examples include an authored guess ping; Studio displays its
+  dashed result line and calculates distance and points with the game-owned
+  scoring rules.
 - All three rounds use the set's map, but each may use any floor.
 - Listener evidence is stored as one JPEG from the beginning of the aligned
   POV plus an M4A audio track.
@@ -43,6 +46,11 @@ The game checkout supplies the current map manifest, blueprint images, and
 operator catalog while the authoring bundle is being separated. Studio data is
 stored in `studio.db`; newly processed capture media is organized under
 `daily sets`.
+
+Use the **Examples** button beside the new-set button to switch the sidebar to
+one-round How to Play authoring. Examples share the map, operator, marker, and
+processed-capture editor, but they cannot enter the release calendar or daily
+publisher. Switch back with **Daily sets**.
 
 ## Capture with OBS
 
@@ -219,8 +227,20 @@ use unsupported contract versions.
 
 ## Upload and schedule a release
 
-Start the Phase 6 game service on loopback with its local-only admin simulation,
-then point Studio at it:
+Studio loads `R6_STUDIO_PUBLISHER_URL` and `R6_STUDIO_PUBLISHER_TOKEN` from the
+ignored repository-root `.env` file when it starts. Values may be unquoted:
+
+```dotenv
+R6_STUDIO_PUBLISHER_URL=https://r6soundle.com
+R6_STUDIO_PUBLISHER_TOKEN=<publisher credential>
+```
+
+An explicitly set process environment variable or `--publisher-url` takes
+precedence over `.env`. Studio only loads these two allowlisted keys and never
+prints the token. Keep `.env` local and untracked.
+
+For local simulation, start the Phase 6 game service on loopback and point
+Studio at it:
 
 ```powershell
 $env:R6_STUDIO_PUBLISHER_URL = "http://127.0.0.1:4190"
@@ -235,6 +255,12 @@ finalizes only after all nine objects pass. Closing or restarting Studio is
 safe: the next action resumes the persisted remote attempt with fresh short
 upload authorizations. A stale map-asset version blocks publish until the set is
 reviewed and approved again.
+
+A future remote release shows **Stop release** in the calendar. Stopping asks
+for an audit reason and makes that revision unavailable without deleting its
+media or history. To change it, select the same date and another approved set,
+then use **Upload & schedule**; Studio asks for a replacement reason and creates
+a new revision that remains gated until that date's midnight ET.
 
 The Phase 7 publisher bearer credential is required and read only from
 `R6_STUDIO_PUBLISHER_TOKEN`; it is never written to `studio.db`, browser state,

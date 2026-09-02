@@ -317,7 +317,7 @@ class CaptureMigrationTests(unittest.TestCase):
             self.assertEqual(("legacy", "approved"), tuple(row))
             self.assertIn("content_fingerprint", columns)
             self.assertIn("imported_source", columns)
-            self.assertEqual(4, version)
+            self.assertEqual(5, version)
 
 
 if __name__ == "__main__":

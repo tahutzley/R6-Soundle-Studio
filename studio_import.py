@@ -375,6 +375,8 @@ class DailySetImporter:
         draft_options: list[dict[str, Any]] = []
         exact_matches: list[dict[str, Any]] = []
         for item in self.store.list_sets():
+            if item.get("kind") != "daily":
+                continue
             if item.get("mapSlug") != scan.map_slug:
                 continue
             if item["status"] == "archived":
@@ -632,6 +634,7 @@ class DailySetImporter:
                     )
                 content = {
                     "id": target_set_id,
+                    "kind": "daily",
                     "name": f"Set {scan.set_number} · {scan.report['source']['mapName']}",
                     "mapSlug": scan.map_slug,
                     "mapName": scan.report["source"]["mapName"],

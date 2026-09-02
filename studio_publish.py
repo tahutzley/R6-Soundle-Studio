@@ -5,12 +5,13 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 
 MEDIA_KIND_MAP = {
@@ -35,6 +36,9 @@ class PublisherClientProtocol(Protocol):
     def upload(self, authorization: Mapping[str, Any], path: Path) -> None: ...
     def verify(self, attempt_id: str) -> dict[str, Any]: ...
     def finalize(self, attempt_id: str) -> dict[str, Any]: ...
+    def make_unavailable(
+        self, release_date: str, expected_revision: int, reason: str, idempotency_key: str
+    ) -> dict[str, Any]: ...
 
 
 class PublisherClient:
@@ -118,6 +122,16 @@ class PublisherClient:
     def finalize(self, attempt_id: str) -> dict[str, Any]:
         return self._request("POST", f"/admin/v1/publish-attempts/{attempt_id}/finalize")
 
+    def make_unavailable(
+        self, release_date: str, expected_revision: int, reason: str, idempotency_key: str
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/admin/v1/releases/{release_date}/unavailable",
+            body={"expectedRevision": expected_revision, "reason": reason},
+            headers={"Idempotency-Key": idempotency_key},
+        )
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -170,6 +184,8 @@ class StudioPublisher:
         item = self.store.get_set(set_id)
         if not item:
             raise KeyError("Set not found")
+        if item.get("kind") != "daily":
+            raise ValueError("How-to examples cannot be published as daily releases")
         if item["status"] != "approved":
             raise ValueError("Only an approved set can be published")
         if item["mapAssetVersion"] != self.catalog["assetVersion"]:
@@ -261,7 +277,9 @@ class StudioPublisher:
                 (release_date, set_id, bundle.payload["studioSetVersion"]),
             ).fetchone()
             if row:
-                return dict(row)
+                prior = dict(row)
+                if json.loads(prior.get("request_json") or "{}") == bundle.payload:
+                    return prior
             now = __import__("studio_server").iso_utc()
             attempt_id = f"publish_{uuid.uuid4().hex[:16]}"
             idempotency_key = f"studio-{uuid.uuid4()}"
@@ -330,14 +348,74 @@ class StudioPublisher:
             rows = connection.execute("SELECT * FROM publish_attempts ORDER BY updated_at DESC").fetchall()
         return [self._decode_attempt(dict(row)) for row in rows]
 
+    @staticmethod
+    def _release_revision(attempt: Mapping[str, Any]) -> int:
+        response = attempt.get("last_response")
+        if isinstance(response, Mapping):
+            release = response.get("release")
+            if isinstance(release, Mapping) and release.get("revision") is not None:
+                return int(release["revision"])
+            if response.get("revision") is not None:
+                return int(response["revision"])
+        version_id = str(attempt.get("remote_release_version_id") or "")
+        marker = version_id.rsplit(":r", 1)
+        if len(marker) == 2 and marker[1].isdigit():
+            return int(marker[1])
+        raise ValueError("The remote release revision is unavailable; refresh or inspect it before changing it")
+
+    def latest_release_attempt(self, release_date: str) -> dict[str, Any] | None:
+        for attempt in self.list_attempts():
+            if attempt["release_date"] != release_date or not attempt.get("remote_release_version_id"):
+                continue
+            remote_state = attempt.get("remote_state") or attempt.get("state")
+            if remote_state in {"scheduled", "released", "emergency_unavailable"}:
+                return attempt
+        return None
+
+    def stop_scheduled(self, release_date: str, reason: str) -> dict[str, Any]:
+        parsed_date = date.fromisoformat(release_date)
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("A reason is required to stop a scheduled release")
+        if parsed_date <= datetime.now(ZoneInfo("America/New_York")).date():
+            raise ValueError("Only a future release can be stopped from Studio")
+        attempt = self.latest_release_attempt(release_date)
+        if not attempt:
+            raise KeyError("Scheduled remote release not found")
+        remote_state = attempt.get("remote_state") or attempt.get("state")
+        if remote_state != "scheduled":
+            raise ValueError("Only a currently scheduled release can be stopped")
+        response = self.client.make_unavailable(
+            release_date,
+            self._release_revision(attempt),
+            reason,
+            f"studio-stop-{uuid.uuid4()}",
+        )
+        return self._update_attempt(
+            attempt["id"],
+            remote_state=str(response.get("state") or "emergency_unavailable"),
+            transition_reason=reason,
+            transitioned_at=__import__("studio_server").iso_utc(),
+            last_response_json=response,
+        )
+
     def _complete_local(self, attempt: dict[str, Any], remote: Mapping[str, Any], bundle: PublishBundle) -> dict[str, Any]:
         remote_attempt = remote.get("publishAttempt") if isinstance(remote.get("publishAttempt"), Mapping) else remote
         release = remote.get("release") if isinstance(remote.get("release"), Mapping) else {}
         remote_release_id = remote_attempt.get("remoteReleaseId") or release.get("releaseId")
         remote_version_id = remote_attempt.get("remoteReleaseVersionId") or release.get("releaseVersionId")
+        remote_state = str(release.get("state") or remote_attempt.get("state") or "scheduled")
         now = __import__("studio_server").iso_utc()
         release_at = __import__("studio_server").release_at_for_date(attempt["release_date"])
         with self.store.connect() as connection:
+            if bundle.payload.get("expectedRevision") is not None:
+                connection.execute(
+                    """UPDATE publish_attempts SET remote_state='superseded', transition_reason=?,
+                       transitioned_at=?, updated_at=?
+                       WHERE release_date=? AND id<>? AND remote_release_version_id IS NOT NULL
+                         AND COALESCE(remote_state, state) IN ('scheduled','released','emergency_unavailable')""",
+                    (bundle.payload.get("reason"), now, now, attempt["release_date"], attempt["id"]),
+                )
             connection.execute(
                 """INSERT INTO schedule_entries
                    (release_date, release_at, set_id, set_version, created_at)
@@ -371,10 +449,11 @@ class StudioPublisher:
                 ),
             )
             connection.execute(
-                """UPDATE publish_attempts SET state='scheduled', remote_release_id=?,
+                """UPDATE publish_attempts SET state='scheduled', remote_state=?, remote_release_id=?,
                    remote_release_version_id=?, last_response_json=?, error_summary=NULL,
                    completed_at=?, updated_at=? WHERE id=?""",
                 (
+                    remote_state,
                     remote_release_id,
                     remote_version_id,
                     json.dumps(remote, separators=(",", ":"), sort_keys=True),

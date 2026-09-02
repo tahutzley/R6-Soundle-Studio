@@ -1,19 +1,56 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from studio_server import Store, load_catalog, position_is_valid, release_at_for_date, validate_set
+from studio_server import (
+    Store,
+    load_catalog,
+    load_local_env,
+    position_is_valid,
+    release_at_for_date,
+    validate_set,
+)
 from tests.capture_fixtures import write_capture
+
+
+class LocalEnvironmentTests(unittest.TestCase):
+    def test_dotenv_loads_allowlisted_unquoted_values_and_preserves_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            env_file = Path(temporary) / ".env"
+            env_file.write_text(
+                "R6_STUDIO_PUBLISHER_URL=https://from-file.example\n"
+                "R6_STUDIO_PUBLISHER_TOKEN=unquoted-file-token\n"
+                "UNRELATED_VALUE=ignored\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                "os.environ",
+                {"R6_STUDIO_PUBLISHER_URL": "https://from-shell.example"},
+                clear=True,
+            ):
+                loaded = load_local_env(env_file)
+                self.assertEqual(("R6_STUDIO_PUBLISHER_TOKEN",), loaded)
+                self.assertEqual(
+                    "https://from-shell.example",
+                    os.environ["R6_STUDIO_PUBLISHER_URL"],
+                )
+                self.assertEqual(
+                    "unquoted-file-token",
+                    os.environ["R6_STUDIO_PUBLISHER_TOKEN"],
+                )
+                self.assertNotIn("UNRELATED_VALUE", os.environ)
 
 
 class StudioStoreTests(unittest.TestCase):
@@ -43,12 +80,71 @@ class StudioStoreTests(unittest.TestCase):
 
     def test_sets_always_have_three_neutral_rounds(self) -> None:
         item = self.store.save_set({"name": "Test", "mapSlug": "bank", "rounds": []})
+        self.assertEqual("daily", item["kind"])
         self.assertEqual([1, 2, 3], [round_item["position"] for round_item in item["rounds"]])
         self.assertNotIn("difficulty", item["rounds"][0])
 
+    def test_how_to_examples_have_one_round_and_cannot_be_scheduled(self) -> None:
+        self.make_capture("capture-1")
+        item = self.store.save_set(
+            {
+                "kind": "example",
+                "name": "How to Play",
+                "mapSlug": "bank",
+                "rounds": [{
+                    **self.complete_round(1, "1-bank/1"),
+                    "guessPos": {"x": 0.65, "y": 0.5, "floorKey": "floor-1"},
+                }],
+            }
+        )
+        self.assertEqual("example", item["kind"])
+        self.assertEqual([1], [round_item["position"] for round_item in item["rounds"]])
+
+        item["status"] = "approved"
+        approved = self.store.save_set(item, item["id"])
+        self.assertEqual("approved", approved["status"])
+        with self.assertRaisesRegex(ValueError, "How-to examples"):
+            self.store.schedule("2035-04-12", approved["id"])
+
+    def test_how_to_example_persists_and_requires_guess(self) -> None:
+        self.make_capture("capture-1")
+        round_item = self.complete_round(1, "1-bank/1")
+        item = self.store.save_set(
+            {
+                "kind": "example",
+                "name": "How to Play",
+                "mapSlug": "bank",
+                "rounds": [round_item],
+            }
+        )
+        item["status"] = "approved"
+        with self.assertRaisesRegex(ValueError, "example guess is required"):
+            self.store.save_set(item, item["id"])
+
+        item["rounds"][0]["guessPos"] = {
+            "x": 0.65,
+            "y": 0.5,
+            "floorKey": "floor-1",
+        }
+        approved = self.store.save_set(item, item["id"])
+        self.assertEqual(item["rounds"][0]["guessPos"], approved["rounds"][0]["guessPos"])
+
+    def test_daily_set_discards_example_guess(self) -> None:
+        item = self.store.save_set(
+            {
+                "name": "Daily",
+                "mapSlug": "bank",
+                "rounds": [{
+                    "position": 1,
+                    "guessPos": {"x": 0.5, "y": 0.5, "floorKey": "floor-1"},
+                }],
+            }
+        )
+        self.assertNotIn("guessPos", item["rounds"][0])
+
     def test_phase6_publish_fields_are_additive_and_inert(self) -> None:
         with self.store.connect() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -72,7 +168,10 @@ class StudioStoreTests(unittest.TestCase):
                 for row in connection.execute("PRAGMA table_info(publish_attempts)")
             }
             self.assertTrue(
-                {"remote_publish_attempt_id", "request_json", "objects_json", "completed_at"}.issubset(
+                {
+                    "remote_publish_attempt_id", "request_json", "objects_json", "completed_at",
+                    "remote_state", "transition_reason", "transitioned_at",
+                }.issubset(
                     publish_columns
                 )
             )
@@ -112,7 +211,7 @@ class StudioStoreTests(unittest.TestCase):
             self.assertEqual(row["set_id"], "set-1")
             self.assertEqual(row["set_version"], 2)
             self.assertIsNone(row["remote_release_id"])
-            self.assertEqual(migrated_connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(migrated_connection.execute("PRAGMA user_version").fetchone()[0], 5)
 
     def test_set_can_be_deleted(self) -> None:
         item = self.store.save_set({"name": "Disposable", "mapSlug": "bank", "rounds": []})
@@ -174,6 +273,39 @@ class StudioStoreTests(unittest.TestCase):
         self.assertEqual("/media/1-bank%2F1/listener.jpg", puzzle["rounds"][0]["evidenceImageUrl"])
         self.assertEqual("/media/1-bank%2F1/listener.m4a", puzzle["rounds"][0]["audioUrl"])
         self.assertEqual("/media/1-bank%2F1/replay.mp4", puzzle["rounds"][0]["replayVideoUrl"])
+
+    def test_unpublished_schedule_can_be_removed_without_deleting_its_set(self) -> None:
+        item = self.store.save_set({"name": "Scheduled", "mapSlug": "bank"})
+        with self.store.connect() as connection:
+            connection.execute("UPDATE puzzle_sets SET status='approved' WHERE id=?", (item["id"],))
+
+        self.store.schedule("2035-04-12", item["id"])
+        removed = self.store.unschedule("2035-04-12")
+
+        self.assertEqual("2035-04-12", removed["release_date"])
+        self.assertIsNone(self.store.get_schedule_entry("2035-04-12"))
+        self.assertIsNotNone(self.store.get_set(item["id"]))
+        with self.assertRaisesRegex(KeyError, "Scheduled release not found"):
+            self.store.unschedule("2035-04-12")
+
+    def test_published_release_cannot_be_removed_from_schedule(self) -> None:
+        for index in range(1, 4):
+            self.make_capture(f"capture-{index}")
+        item = self.store.save_set(
+            {
+                "name": "Published",
+                "mapSlug": "bank",
+                "rounds": [self.complete_round(index, f"1-bank/{index}") for index in range(1, 4)],
+            }
+        )
+        item["status"] = "approved"
+        item = self.store.save_set(item, item["id"])
+        self.store.schedule("2035-04-12", item["id"])
+        self.store.public_puzzle("2035-04-12", datetime(2035, 4, 13, tzinfo=timezone.utc))
+
+        with self.assertRaisesRegex(ValueError, "published release"):
+            self.store.unschedule("2035-04-12")
+        self.assertIsNotNone(self.store.get_schedule_entry("2035-04-12"))
 
     def test_new_york_midnight_handles_daylight_saving(self) -> None:
         cases = {

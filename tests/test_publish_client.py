@@ -74,6 +74,15 @@ class InProcessPublisherClient:
     def finalize(self, attempt_id):
         return self._value(self.client.post(f"/admin/v1/publish-attempts/{attempt_id}/finalize"))
 
+    def make_unavailable(self, release_date, expected_revision, reason, idempotency_key):
+        return self._value(
+            self.client.post(
+                f"/admin/v1/releases/{release_date}/unavailable",
+                headers={"Idempotency-Key": idempotency_key},
+                json={"expectedRevision": expected_revision, "reason": reason},
+            )
+        )
+
 
 class StudioPublishClientTests(unittest.TestCase):
     def test_remote_client_requires_bearer_and_https_outside_loopback(self) -> None:
@@ -182,6 +191,32 @@ class StudioPublishClientTests(unittest.TestCase):
                     "SELECT * FROM published_releases WHERE release_date='2026-09-02'"
                 ).fetchone()
                 self.assertEqual(published["remote_release_id"], completed["remote_release_id"])
+            if interrupt_after == 1:
+                stopped = restarted.stop_scheduled("2026-09-02", "content needs correction")
+                self.assertEqual(stopped["remote_state"], "emergency_unavailable")
+                self.assertEqual(stopped["transition_reason"], "content needs correction")
+                replacement_draft = store.save_set(
+                    {
+                        "name": "Replacement set",
+                        "mapSlug": "bank",
+                        "mapName": "Bank",
+                        "mapAssetVersion": catalog["assetVersion"],
+                        "rounds": rounds,
+                    }
+                )
+                replacement_draft["status"] = "approved"
+                replacement = store.save_set(replacement_draft, replacement_draft["id"])
+                corrected = restarted.publish(
+                    "2026-09-02",
+                    replacement["id"],
+                    expected_revision=1,
+                    reason="replace stopped set",
+                )
+                self.assertEqual(corrected["remote_state"], "scheduled")
+                self.assertTrue(corrected["remote_release_version_id"].endswith(":r2"))
+                attempts = restarted.list_attempts()
+                original = next(item for item in attempts if item["id"] == stopped["id"])
+                self.assertEqual(original["remote_state"], "superseded")
 
     def test_resume_after_objects_one_five_and_nine(self) -> None:
         for count in (1, 5, 9):

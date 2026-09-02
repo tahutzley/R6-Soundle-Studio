@@ -39,7 +39,13 @@ ROOT = Path(__file__).resolve().parent
 STUDIO_DIR = ROOT / "studio"
 DEFAULT_DB = ROOT / "studio.db"
 DEFAULT_GAME_REPO = ROOT.parent / "R6-Soundle"
+LOCAL_ENV_FILE = ROOT / ".env"
+LOCAL_ENV_KEYS = frozenset({
+    "R6_STUDIO_PUBLISHER_URL",
+    "R6_STUDIO_PUBLISHER_TOKEN",
+})
 PREVIEW_SCHEMA_VERSION = 1
+STUDIO_API_VERSION = 4
 PREVIEW_TTL = timedelta(minutes=30)
 EASTERN = ZoneInfo("America/New_York")
 GAME_PREVIEW_ASSET_PREFIXES = (
@@ -66,6 +72,25 @@ MAP_NAMES = {
     "themepark": "Theme Park",
     "villa": "Villa",
 }
+
+
+def load_local_env(path: Path = LOCAL_ENV_FILE) -> tuple[str, ...]:
+    """Load allowlisted Studio settings without overriding the parent shell."""
+    if not path.is_file():
+        return ()
+    loaded: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key not in LOCAL_ENV_KEYS or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ[key] = value
+        loaded.append(key)
+    return tuple(loaded)
 
 
 SCHEMA = """
@@ -159,8 +184,8 @@ def slug_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-def empty_round(position: int) -> dict[str, Any]:
-    return {
+def empty_round(position: int, *, include_guess: bool = False) -> dict[str, Any]:
+    item = {
         "position": position,
         "operatorId": None,
         "listenerPos": None,
@@ -168,25 +193,38 @@ def empty_round(position: int) -> dict[str, Any]:
         "targetPos": None,
         "captureId": None,
     }
+    if include_guess:
+        item["guessPos"] = None
+    return item
 
 
 def normalize_set(payload: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
+    kind = str((existing or {}).get("kind") or payload.get("kind") or "daily")
+    if kind not in {"daily", "example"}:
+        raise ValueError("Set kind must be daily or example")
+    round_count = 1 if kind == "example" else 3
     rounds_by_position = {
         int(item.get("position", index + 1)): item
         for index, item in enumerate(payload.get("rounds") or [])
         if isinstance(item, dict)
     }
     rounds = []
-    for position in range(1, 4):
+    for position in range(1, round_count + 1):
         source = rounds_by_position.get(position, {})
-        item = empty_round(position)
+        item = empty_round(position, include_guess=kind == "example")
         for key in ("operatorId", "listenerPos", "operatorStartPos", "targetPos", "captureId"):
             item[key] = source.get(key)
+        if kind == "example":
+            item["guessPos"] = source.get("guessPos")
         rounds.append(item)
 
     item = {
         "id": existing["id"] if existing else str(payload.get("id") or slug_id("set")),
-        "name": str(payload.get("name") or (existing or {}).get("name") or "Untitled set").strip(),
+        "kind": kind,
+        "name": str(
+            payload.get("name") or (existing or {}).get("name")
+            or ("Untitled example" if kind == "example" else "Untitled set")
+        ).strip(),
         "mapSlug": str(payload.get("mapSlug") or (existing or {}).get("mapSlug") or "").strip(),
         "mapName": str(payload.get("mapName") or (existing or {}).get("mapName") or "").strip(),
         "mapAssetVersion": str(payload.get("mapAssetVersion") or "game-checkout").strip(),
@@ -217,8 +255,10 @@ def validate_set(item: dict[str, Any], captures: dict[str, dict[str, Any]]) -> l
     if not item.get("mapSlug"):
         errors.append("Map is required")
     rounds = item.get("rounds") or []
-    if len(rounds) != 3:
-        errors.append("A set must contain exactly three rounds")
+    expected_rounds = 1 if item.get("kind") == "example" else 3
+    if len(rounds) != expected_rounds:
+        label = "An example" if item.get("kind") == "example" else "A daily set"
+        errors.append(f"{label} must contain exactly {expected_rounds} round{'s' if expected_rounds != 1 else ''}")
         return errors
     for index, round_item in enumerate(rounds, 1):
         prefix = f"Round {index}"
@@ -231,6 +271,8 @@ def validate_set(item: dict[str, Any], captures: dict[str, dict[str, Any]]) -> l
         ):
             if not position_is_valid(round_item.get(key)):
                 errors.append(f"{prefix}: {label} is required")
+        if item.get("kind") == "example" and not position_is_valid(round_item.get("guessPos")):
+            errors.append(f"{prefix}: example guess is required")
         capture_id = round_item.get("captureId")
         if not capture_id:
             errors.append(f"{prefix}: processed capture is required")
@@ -292,6 +334,9 @@ class Store:
             "objects_json": "TEXT NOT NULL DEFAULT '[]'",
             "last_response_json": "TEXT",
             "completed_at": "TEXT",
+            "remote_state": "TEXT",
+            "transition_reason": "TEXT",
+            "transitioned_at": "TEXT",
         }
         for name, declaration in publish_additions.items():
             if name not in publish_columns:
@@ -301,7 +346,7 @@ class Store:
                ON publish_attempts(remote_publish_attempt_id)
                WHERE remote_publish_attempt_id IS NOT NULL"""
         )
-        connection.execute("PRAGMA user_version = 4")
+        connection.execute("PRAGMA user_version = 5")
 
     @contextmanager
     def connect(self):
@@ -324,6 +369,7 @@ class Store:
     @staticmethod
     def _decode_set(row: sqlite3.Row) -> dict[str, Any]:
         item = json.loads(row["content_json"])
+        item.setdefault("kind", "daily")
         item.update(
             status=row["status"],
             version=row["version"],
@@ -470,6 +516,8 @@ class Store:
         item = self.get_set(set_id)
         if not item:
             raise KeyError("Set not found")
+        if item.get("kind") != "daily":
+            raise ValueError("How-to examples cannot be scheduled as daily releases")
         if item["status"] != "approved":
             raise ValueError("Only an approved set can be scheduled")
         release_at = release_at_for_date(release_date)
@@ -498,12 +546,39 @@ class Store:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT s.*, p.name AS set_name, p.status AS set_status
+                SELECT s.*, p.name AS set_name, p.status AS set_status,
+                       EXISTS(
+                           SELECT 1 FROM published_releases published
+                           WHERE published.release_date=s.release_date
+                       ) AS is_published
                 FROM schedule_entries s JOIN puzzle_sets p ON p.id=s.set_id
                 ORDER BY s.release_date
                 """
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def unschedule(self, release_date: str) -> dict[str, Any]:
+        date.fromisoformat(release_date)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM schedule_entries WHERE release_date=?", (release_date,)
+            ).fetchone()
+            if not row:
+                raise KeyError("Scheduled release not found")
+            published = connection.execute(
+                "SELECT 1 FROM published_releases WHERE release_date=?", (release_date,)
+            ).fetchone()
+            if published:
+                raise ValueError("A published release cannot be removed from the schedule")
+            attempt = connection.execute(
+                "SELECT 1 FROM publish_attempts WHERE release_date=? LIMIT 1", (release_date,)
+            ).fetchone()
+            if attempt:
+                raise ValueError("A remote publish attempt cannot be removed from the local schedule")
+            connection.execute(
+                "DELETE FROM schedule_entries WHERE release_date=?", (release_date,)
+            )
+        return dict(row)
 
     def _snapshot(self, entry: dict[str, Any]) -> dict[str, Any]:
         item = self.get_set(entry["set_id"])
@@ -624,6 +699,18 @@ def load_catalog(game_repo: Path) -> dict[str, Any]:
                 "coordinateFrame": coordinate_frame,
                 "pixelsPerMeter": float(image.get("pixels_per_meter") or 1),
                 "coordinateSize": float(image.get("coordinate_size") or 2048),
+                "assetWidth": float(
+                    image.get("final_output_width")
+                    or image.get("output_width")
+                    or image.get("coordinate_size")
+                    or 2048
+                ),
+                "assetHeight": float(
+                    image.get("final_output_height")
+                    or image.get("output_height")
+                    or image.get("coordinate_size")
+                    or 2048
+                ),
             }
         )
     floor_order = {"tunnel": -2, "basement": -1, "1f": 1, "2f": 2, "3f": 3, "big-tower-t3": 4}
@@ -800,6 +887,8 @@ class PreviewSessions:
         item = self.app.store.get_set(set_id)
         if not item:
             raise KeyError("Set not found")
+        if item.get("kind") != "daily":
+            raise ValueError("How-to examples do not use the daily challenge preview")
         if expected_version is not None and item["version"] != expected_version:
             raise ValueError(
                 f"Draft version changed from {expected_version} to {item['version']}; save and preview again"
@@ -845,6 +934,12 @@ class App:
     @property
     def catalog(self) -> dict[str, Any]:
         return load_catalog(self.game_repo)
+
+    def save_set(self, payload: dict[str, Any], set_id: str | None = None) -> dict[str, Any]:
+        reviewed = dict(payload)
+        if reviewed.get("status") == "approved":
+            reviewed["mapAssetVersion"] = self.catalog["assetVersion"]
+        return self.store.save_set(reviewed, set_id)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -972,7 +1067,7 @@ class Handler(BaseHTTPRequestHandler):
             if preview:
                 self._serve_preview(*preview)
             elif path == "/api/health":
-                self._json({"ok": True, "time": iso_utc()})
+                self._json({"ok": True, "time": iso_utc(), "apiVersion": STUDIO_API_VERSION})
             elif path == "/api/catalog":
                 self._json(self.app.catalog)
             elif path == "/api/sets":
@@ -1014,7 +1109,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             if path == "/api/sets":
-                self._json(self.app.store.save_set(payload), 201)
+                self._json(self.app.save_set(payload), 201)
             elif path == "/api/previews":
                 requested_schema = int(payload.get("schemaVersion", PREVIEW_SCHEMA_VERSION))
                 if requested_schema != PREVIEW_SCHEMA_VERSION:
@@ -1061,9 +1156,42 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.app.publisher:
                     self._json({"error": "Remote publisher is not configured"}, 409)
                     return
+                release_date = str(payload["releaseDate"])
+                set_id = str(payload["setId"])
+                existing = self.app.publisher.latest_release_attempt(release_date)
+                expected_revision = None
+                reason = None
+                if existing:
+                    selected = self.app.store.get_set(set_id)
+                    same_version = bool(
+                        selected
+                        and existing["set_id"] == set_id
+                        and int(existing["set_version"]) == int(selected["version"])
+                    )
+                    remote_state = existing.get("remote_state") or existing.get("state")
+                    if remote_state in {"scheduled", "released", "emergency_unavailable"} and (
+                        not same_version or remote_state == "emergency_unavailable"
+                    ):
+                        reason = str(payload.get("reason") or "").strip()
+                        if not reason:
+                            raise ValueError("A reason is required to replace a remote release")
+                        expected_revision = self.app.publisher._release_revision(existing)
                 self._json(
-                    self.app.publisher.publish(str(payload["releaseDate"]), str(payload["setId"])),
+                    self.app.publisher.publish(
+                        release_date,
+                        set_id,
+                        expected_revision=expected_revision,
+                        reason=reason,
+                    ),
                     201,
+                )
+            elif path.startswith("/api/releases/") and path.endswith("/stop"):
+                if not self.app.publisher:
+                    self._json({"error": "Remote publisher is not configured"}, 409)
+                    return
+                release_date = unquote(path.removeprefix("/api/releases/").removesuffix("/stop").rstrip("/"))
+                self._json(
+                    self.app.publisher.stop_scheduled(release_date, str(payload.get("reason") or ""))
                 )
             elif path == "/api/releases/publish-due":
                 self._json({"published": self.app.store.publish_due()})
@@ -1089,7 +1217,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "Not found"}, 404)
                 return
             set_id = path.rsplit("/", 1)[1]
-            self._json(self.app.store.save_set(self._read_json(), set_id))
+            self._json(self.app.save_set(self._read_json(), set_id))
         except KeyError as error:
             self._json({"error": str(error)}, 404)
         except (ValueError, json.JSONDecodeError) as error:
@@ -1100,13 +1228,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
         try:
-            if not path.startswith("/api/sets/"):
+            if path.startswith("/api/schedule/"):
+                release_date = unquote(path.rsplit("/", 1)[1])
+                removed = self.app.store.unschedule(release_date)
+                self._json({"deleted": True, "releaseDate": removed["release_date"]})
+            elif path.startswith("/api/sets/"):
+                self.app.store.delete_set(path.rsplit("/", 1)[1])
+                self._json({"deleted": True})
+            else:
                 self._json({"error": "Not found"}, 404)
-                return
-            self.app.store.delete_set(path.rsplit("/", 1)[1])
-            self._json({"deleted": True})
         except KeyError as error:
             self._json({"error": str(error)}, 404)
+        except ValueError as error:
+            self._json({"error": str(error)}, 400)
         except Exception as error:
             self._json({"error": str(error)}, 500)
 
@@ -1120,6 +1254,7 @@ class Server(ThreadingHTTPServer):
 
 
 def run_server(args: argparse.Namespace) -> None:
+    load_local_env()
     if args.host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("Studio is owner-only and must bind to a loopback host")
     game_repo = args.game_repo.resolve()

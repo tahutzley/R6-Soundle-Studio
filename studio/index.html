@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#07090d">
     <title>R6 Soundle Studio</title>
-    <link rel="stylesheet" href="/styles.css?v=20260901-p2f">
+    <link rel="stylesheet" href="/styles.css?v=20260901-p2j">
   </head>
   <body>
     <header class="topbar">
@@ -20,11 +20,14 @@
     <main class="workspace">
       <aside class="sidebar panel">
         <div class="section-title">
-          <div><p class="eyebrow">LIBRARY</p><h2>Sets</h2></div>
-          <button class="icon-button" id="newSet" title="New set">+</button>
+          <div><p class="eyebrow">LIBRARY</p><h2 id="libraryTitle">Daily sets</h2></div>
+          <div class="library-actions">
+            <button type="button" class="library-toggle" id="toggleLibrary">Examples</button>
+            <button type="button" class="icon-button" id="newSet" title="New daily set" aria-label="New daily set">+</button>
+          </div>
         </div>
         <div id="setList" class="set-list"></div>
-        <div class="sidebar-footer">
+        <div class="sidebar-footer" id="sidebarFooter">
           <button id="showImport">Import daily set</button>
           <button id="showSchedule">Release calendar</button>
         </div>
@@ -32,10 +35,10 @@
 
       <section class="editor panel" id="editorPanel">
         <div class="empty-state" id="emptyState">
-          <span>03</span>
-          <h2>Build one complete game day</h2>
-          <p>Create a set, place the listener and runner markers, then attach one processed capture to each round.</p>
-          <button class="primary" id="emptyNewSet">Create a set</button>
+          <span id="emptyCount">03</span>
+          <h2 id="emptyTitle">Build one complete game day</h2>
+          <p id="emptyCopy">Create a set, place the listener and runner markers, then attach one processed capture to each round.</p>
+          <button class="primary" id="emptyNewSet">Create a daily set</button>
         </div>
 
         <div id="editor" hidden>
@@ -43,7 +46,7 @@
             <div class="round-tabs" id="roundTabs"></div>
             <div class="editor-head">
               <label class="title-field">
-                <span>Set name</span>
+                <span id="setNameLabel">Set name</span>
                 <input id="setName" placeholder="Clubhouse roaming set">
               </label>
               <label>
@@ -51,7 +54,7 @@
                 <select id="mapSelect"></select>
               </label>
               <div class="editor-actions">
-                <label class="preview-date-field">
+                <label class="preview-date-field" id="previewDateField">
                   <span>Preview date</span>
                   <input id="previewDate" type="date">
                 </label>
@@ -77,6 +80,11 @@
                 <img id="mapImage" alt="Selected floor blueprint">
                 <canvas id="mapCanvas" tabindex="0" role="application" aria-label="Floor plan editor. Click to place the selected marker, drag markers to move them, drag the map to pan, and use the mouse wheel, plus and minus keys, or two fingers to zoom."></canvas>
                 <div class="map-markers" id="mapMarkers" aria-hidden="true"></div>
+                <div class="example-result" id="exampleResult" role="status" hidden>
+                  <span><strong id="exampleDistance">—</strong> from target</span>
+                  <span><strong id="examplePoints">—</strong></span>
+                  <span class="example-floor-penalty" id="exampleFloorPenalty" hidden></span>
+                </div>
                 <div class="map-zoom-controls" role="group" aria-label="Map zoom controls">
                   <button class="map-zoom-control" id="mapZoomIn" type="button" aria-label="Zoom in on map" title="Zoom in [+]">
                     <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"></path></svg>
@@ -182,6 +190,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status"></div>
-    <script type="module" src="/app.js?v=20260901-p6"></script>
+    <script type="module" src="/app.js?v=20260901-p9"></script>
   </body>
 </html>

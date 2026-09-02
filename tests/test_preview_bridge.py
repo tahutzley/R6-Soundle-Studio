@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from studio_server import App, PREVIEW_SCHEMA_VERSION, Server, Store
+from studio_server import App, PREVIEW_SCHEMA_VERSION, STUDIO_API_VERSION, Server, Store
 from tests.capture_fixtures import write_capture
 
 
@@ -114,6 +114,30 @@ class PreviewBridgeTests(unittest.TestCase):
         self.assertIn("MISSING_MEDIA_2", codes)
         self.assertIsNone(session.contract["puzzle"]["rounds"][1]["videoUrl"])
 
+    def test_approval_refreshes_the_reviewed_map_asset_version(self) -> None:
+        item = self.store.get_set(self.item["id"])
+        item["mapAssetVersion"] = "old-assets"
+        item["status"] = "approved"
+
+        approved = self.app.save_set(item, item["id"])
+
+        self.assertEqual("approved", approved["status"])
+        self.assertEqual("test-assets", approved["mapAssetVersion"])
+
+    def test_how_to_example_does_not_use_daily_challenge_preview(self) -> None:
+        example = self.store.save_set(
+            {
+                "kind": "example",
+                "name": "Example",
+                "mapSlug": "bank",
+                "mapAssetVersion": "test-assets",
+                "rounds": [self.item["rounds"][0]],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "How-to examples"):
+            self.app.previews.create(example["id"], "2031-04-05")
+
     def test_expired_session_rejects_contract_and_media(self) -> None:
         now = datetime(2030, 1, 1, tzinfo=timezone.utc)
         self.app.previews.now = lambda: now
@@ -131,6 +155,17 @@ class PreviewBridgeTests(unittest.TestCase):
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
         try:
+            health = json.loads(urlopen(f"{base}/api/health").read())
+            self.assertEqual(STUDIO_API_VERSION, health["apiVersion"])
+
+            self.item["status"] = "approved"
+            self.item = self.store.save_set(self.item, self.item["id"])
+            self.store.schedule("2035-04-12", self.item["id"])
+            remove = Request(f"{base}/api/schedule/2035-04-12", method="DELETE")
+            removed = json.loads(urlopen(remove).read())
+            self.assertEqual("2035-04-12", removed["releaseDate"])
+            self.assertIsNone(self.store.get_schedule_entry("2035-04-12"))
+
             bad = Request(
                 f"{base}/api/previews",
                 data=json.dumps({"schemaVersion": 99, "setId": self.item["id"]}).encode(),

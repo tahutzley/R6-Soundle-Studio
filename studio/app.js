@@ -1,12 +1,21 @@
+import {
+  calculateMapDistance,
+  calculateRoundScore,
+  formatDistance,
+  loadScoringConfig,
+} from "/game-assets/js/scoring.mjs";
+
 const $ = (selector) => document.querySelector(selector);
 
 const state = {
   catalog: { maps: [], operators: [], assetVersion: "" },
+  scoring: null,
   sets: [],
   captures: [],
   schedule: [],
   publishAttempts: [],
   publisher: { configured: false },
+  libraryKind: "daily",
   current: null,
   roundIndex: 0,
   floorKey: "",
@@ -21,9 +30,11 @@ const markerInfo = {
   listenerPos: { label: "Listener", color: "#46a8ff" },
   operatorStartPos: { label: "Runner Start", color: "#ef8a2e" },
   targetPos: { label: "Runner End", color: "#78dca3" },
+  guessPos: { label: "Guess", color: "#f2d024" },
 };
 
 const RECRUIT_ICON_URL = "/game-assets/operators/svg/recruit_gray.svg";
+const STUDIO_API_VERSION = 4;
 const mapView = { zoom: 1, minZoom: 1, maxZoom: 6, centerX: .5, centerY: .5 };
 const mapPointers = new Map();
 let mapGesture = null;
@@ -35,9 +46,27 @@ async function api(path, options = {}) {
     ...options,
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
-  const result = await response.json();
+  const contentType = response.headers.get("Content-Type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    throw new Error(
+      `Studio API returned an unexpected response (${response.status}). Restart Studio, then refresh this page.`,
+    );
+  }
+  let result;
+  try {
+    result = JSON.parse(await response.text());
+  } catch {
+    throw new Error("Studio API returned invalid data. Restart Studio, then refresh this page.");
+  }
   if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
   return result;
+}
+
+async function assertServerCompatibility() {
+  const health = await api("/api/health");
+  if (health.apiVersion !== STUDIO_API_VERSION) {
+    throw new Error("Studio was updated while its server was running. Restart Studio, then refresh this page.");
+  }
 }
 
 function wideCoordinateFrame(image) {
@@ -70,6 +99,10 @@ async function loadWideCatalog() {
     if (!floor) continue;
     floor.imageUrl = `/game-assets/maps/${file}`;
     floor.coordinateFrame = wideCoordinateFrame(image);
+    floor.coordinateSize = Number(image.coordinate_size) || 2048;
+    floor.assetWidth = Number(image.final_output_width || image.output_width) || floor.coordinateSize;
+    floor.assetHeight = Number(image.final_output_height || image.output_height) || floor.coordinateSize;
+    floor.pixelsPerMeter = Number(image.pixels_per_meter) || floor.pixelsPerMeter;
   }
   catalog.assetVersion = String(manifest.settings?.refreshedAt || catalog.assetVersion || "wide-upscaled");
   return catalog;
@@ -119,12 +152,49 @@ function listenerDirectionStatus(listener) {
 }
 
 function markerToolDetails(round = selectedRound(), floors = selectedMap()?.floors || []) {
-  return [
+  const details = [
     ["listenerPos", "listener", "Listener", markerToolStatus(round?.listenerPos, floors)],
     ["listenerAngle", "direction", "Direction", listenerDirectionStatus(round?.listenerPos)],
     ["operatorStartPos", "start", "Runner Start", markerToolStatus(round?.operatorStartPos, floors)],
     ["targetPos", "target", "Runner End", markerToolStatus(round?.targetPos, floors)],
   ];
+  if (state.current?.kind === "example") {
+    details.push(["guessPos", "guess", "Guess", markerToolStatus(round?.guessPos, floors)]);
+  }
+  return details;
+}
+
+function exampleResult(round = selectedRound()) {
+  if (state.current?.kind !== "example" || !state.scoring || !round?.guessPos || !round?.targetPos) {
+    return null;
+  }
+  const floor = selectedMap()?.floors.find((item) => item.key === round.targetPos.floorKey);
+  if (!floor) return null;
+  const distance = calculateMapDistance(round.guessPos, round.targetPos, floor);
+  const floorCorrect = round.guessPos.floorKey === round.targetPos.floorKey;
+  return {
+    distance,
+    floorCorrect,
+    ...calculateRoundScore(state.scoring, distance, floorCorrect),
+  };
+}
+
+function renderExampleResult(round = selectedRound()) {
+  const element = $("#exampleResult");
+  const result = exampleResult(round);
+  element.hidden = !result;
+  if (!result) return;
+  $("#exampleDistance").textContent = `${formatDistance(result.distance)} m`;
+  $("#examplePoints").textContent = `${result.points.toLocaleString()} pts`;
+  const penalty = $("#exampleFloorPenalty");
+  penalty.hidden = result.floorCorrect;
+  penalty.textContent = result.floorCorrect
+    ? ""
+    : `Wrong floor −${result.floorPenalty.toLocaleString()} pts`;
+  element.setAttribute(
+    "aria-label",
+    `${formatDistance(result.distance)} meters from target, ${result.points} points${result.floorCorrect ? "" : ", wrong floor penalty applied"}`,
+  );
 }
 
 function updateMarkerToolStatuses() {
@@ -252,11 +322,35 @@ function captureById(id) {
 }
 
 function roundComplete(round) {
-  return Boolean(round.operatorId && round.listenerPos && round.operatorStartPos && round.targetPos && captureById(round.captureId));
+  const exampleReady = state.current?.kind !== "example" || round.guessPos;
+  return Boolean(round.operatorId && round.listenerPos && round.operatorStartPos && round.targetPos && exampleReady && captureById(round.captureId));
+}
+
+function visibleSets() {
+  return state.sets.filter((item) => (item.kind || "daily") === state.libraryKind);
+}
+
+function renderLibraryChrome() {
+  const examples = state.libraryKind === "example";
+  $("#libraryTitle").textContent = examples ? "Examples" : "Daily sets";
+  $("#toggleLibrary").textContent = examples ? "Daily sets" : "Examples";
+  $("#toggleLibrary").title = examples ? "Show daily sets" : "Show How to Play examples";
+  $("#toggleLibrary").setAttribute("aria-label", $("#toggleLibrary").title);
+  $("#newSet").title = examples ? "New example" : "New daily set";
+  $("#newSet").setAttribute("aria-label", $("#newSet").title);
+  $("#sidebarFooter").hidden = examples;
+  $("#emptyCount").textContent = examples ? "01" : "03";
+  $("#emptyTitle").textContent = examples ? "Build a How to Play example" : "Build one complete game day";
+  $("#emptyCopy").textContent = examples
+    ? "Create a one-round example, place its markers, and attach one processed synced capture."
+    : "Create a set, place the listener and runner markers, then attach one processed capture to each round.";
+  $("#emptyNewSet").textContent = examples ? "Create an example" : "Create a daily set";
 }
 
 function renderSetList() {
-  $("#setList").innerHTML = state.sets.length ? state.sets.map((item) => `
+  renderLibraryChrome();
+  const items = visibleSets();
+  $("#setList").innerHTML = items.length ? items.map((item) => `
     <div class="set-item ${item.id === state.current?.id ? "active" : ""}">
       <button class="set-item-select" type="button" data-set-id="${escapeHtml(item.id)}">
         <strong>${escapeHtml(item.name)}</strong>
@@ -264,7 +358,7 @@ function renderSetList() {
         <span class="pill ${escapeHtml(item.status)}">${escapeHtml(item.status)}</span>
       </button>
       <button class="set-item-delete" type="button" data-delete-set-id="${escapeHtml(item.id)}" aria-label="Delete ${escapeHtml(item.name)}" title="Delete set">×</button>
-    </div>`).join("") : `<p class="hint">No sets yet.</p>`;
+    </div>`).join("") : `<p class="hint">No ${state.libraryKind === "example" ? "examples" : "daily sets"} yet.</p>`;
 }
 
 function fillMapSelect() {
@@ -280,6 +374,13 @@ function renderEditor() {
   if (!item) return;
 
   $("#setName").value = item.name;
+  const example = item.kind === "example";
+  $(".map-toolbar").classList.toggle("example-tools", example);
+  $("#setNameLabel").textContent = example ? "Example name" : "Set name";
+  $("#previewDateField").hidden = example;
+  $("#previewSet").hidden = example;
+  $("#importDailySet").hidden = example;
+  $("#approveSet").textContent = example ? "Approve example" : "Approve set";
   $("#mapSelect").value = item.mapSlug;
   $("#roundTabs").innerHTML = item.rounds.map((round, index) => {
     const operator = operatorById(round.operatorId);
@@ -297,7 +398,7 @@ function renderEditor() {
   }).join("");
 
   const round = selectedRound();
-  $("#roundEyebrow").textContent = `ROUND ${state.roundIndex + 1} OF 3`;
+  $("#roundEyebrow").textContent = `ROUND ${state.roundIndex + 1} OF ${item.rounds.length}`;
   $("#roundHeading").textContent = `Round ${state.roundIndex + 1}`;
   renderOperatorField();
   $("#captureSelect").innerHTML = `<option value="">Attach processed capture</option>` + state.captures.map((capture) =>
@@ -318,6 +419,7 @@ function renderEditor() {
     $("#mapImage").src = floor.imageUrl;
   }
   const toolDetails = markerToolDetails(round, floors);
+  if (!toolDetails.some(([tool]) => tool === state.tool)) state.tool = "listenerPos";
   $("#markerTools").innerHTML = toolDetails.map(([tool, icon, label, status]) => `
     <button data-tool="${tool}" class="${state.tool === tool ? "active" : ""}" type="button" aria-label="${label}: ${status}">
       <i class="${icon}" aria-hidden="true"></i><span>${label}</span><small>${escapeHtml(status)}</small>
@@ -683,17 +785,24 @@ function drawMarkers() {
     return;
   }
   const round = selectedRound();
+  drawExampleResultLine(context, round);
   const listener = round.listenerPos?.floorKey === state.floorKey ? round.listenerPos : null;
   if (listener) drawFacingCone(context, viewportPoint(toAssetPoint(listener)), width, listener.angle);
   const operator = operatorById(round.operatorId);
   const iconUrl = operatorIconUrl(operator);
-  $("#mapMarkers").innerHTML = Object.keys(markerInfo).map((key) => {
+  const markerKeys = state.current.kind === "example"
+    ? Object.keys(markerInfo)
+    : Object.keys(markerInfo).filter((key) => key !== "guessPos");
+  $("#mapMarkers").innerHTML = markerKeys.map((key) => {
     const position = round[key];
     if (!position || position.floorKey !== state.floorKey) return "";
     const point = viewportPoint(toAssetPoint(position));
     const style = `left:${point.x.toFixed(2)}px;top:${point.y.toFixed(2)}px`;
     if (key === "listenerPos") {
       return `<div class="map-marker map-marker-listener" style="${style}"><img src="${RECRUIT_ICON_URL}" alt=""><span class="map-marker-tag">LISTENER</span></div>`;
+    }
+    if (key === "guessPos") {
+      return `<div class="map-marker map-marker-guess" style="${style}"><img src="/game-assets/icons/guess-ping.svg" alt=""><span class="map-marker-tag">GUESS</span></div>`;
     }
     const runnerEnd = key === "targetPos";
     const className = runnerEnd ? "map-marker-end" : "map-marker-start";
@@ -703,6 +812,25 @@ function drawMarkers() {
       : `<span class="map-marker-placeholder" aria-hidden="true">${runnerEnd ? "RE" : "RS"}</span>`;
     return `<div class="map-marker map-marker-runner ${className}" style="${style}">${visual}<span class="map-marker-tag">${label}</span></div>`;
   }).join("");
+  renderExampleResult(round);
+}
+
+function drawExampleResultLine(context, round) {
+  if (state.current?.kind !== "example" || !round?.guessPos || !round?.targetPos) return;
+  const onResultFloor = [round.guessPos.floorKey, round.targetPos.floorKey].includes(state.floorKey);
+  if (!onResultFloor) return;
+  const guess = viewportPoint(toAssetPoint(round.guessPos));
+  const target = viewportPoint(toAssetPoint(round.targetPos));
+  context.save();
+  context.beginPath();
+  context.setLineDash([8, 7]);
+  context.strokeStyle = "#8ed8ff";
+  context.lineWidth = 3;
+  context.globalAlpha = round.guessPos.floorKey === round.targetPos.floorKey ? .95 : .48;
+  context.moveTo(guess.x, guess.y);
+  context.lineTo(target.x, target.y);
+  context.stroke();
+  context.restore();
 }
 
 function drawFacingCone(context, position, width, angleValue) {
@@ -794,20 +922,34 @@ async function refreshData() {
 async function createSet() {
   if (autoSaveTimer) await persistDraft();
   const map = state.catalog.maps[0];
+  const kind = state.libraryKind;
+  const roundCount = kind === "example" ? 1 : 3;
   const item = await api("/api/sets", {
     method: "POST",
     body: JSON.stringify({
-      name: "Untitled set",
+      kind,
+      name: kind === "example" ? "Untitled example" : "Untitled set",
       mapSlug: map?.slug || "",
       mapName: map?.name || "",
       mapAssetVersion: state.catalog.assetVersion,
-      rounds: [1, 2, 3].map((position) => ({ position })),
+      rounds: Array.from({ length: roundCount }, (_, index) => ({ position: index + 1 })),
     }),
   });
   await refreshData();
   state.current = state.sets.find((candidate) => candidate.id === item.id);
   state.roundIndex = 0;
   state.floorKey = selectedMap()?.floors[0]?.key || "";
+  resetMapView();
+  renderEditor();
+}
+
+async function switchLibrary() {
+  if (autoSaveTimer) await persistDraft();
+  await autoSavePromise.catch(() => {});
+  state.libraryKind = state.libraryKind === "daily" ? "example" : "daily";
+  state.current = null;
+  state.roundIndex = 0;
+  state.floorKey = "";
   resetMapView();
   renderEditor();
 }
@@ -860,14 +1002,17 @@ async function saveSet(status) {
   await refreshData();
   state.current = state.sets.find((item) => item.id === saved.id);
   renderEditor();
-  toast("Set approved");
+  toast(state.current.kind === "example" ? "Example approved" : "Set approved");
 }
 
 async function deleteSet(setId) {
   const item = state.sets.find((candidate) => candidate.id === setId);
   if (!item) return;
   const setName = item.name || "Untitled set";
-  if (!window.confirm(`Delete “${setName}”? This also removes it from the release calendar.`)) return;
+  const warning = item.kind === "example"
+    ? "This removes it from the How to Play examples library."
+    : "This also removes it from the release calendar.";
+  if (!window.confirm(`Delete “${setName}”? ${warning}`)) return;
   if (state.current?.id === setId) {
     clearTimeout(autoSaveTimer);
     autoSaveTimer = null;
@@ -941,26 +1086,65 @@ function updateImportCommitAvailability() {
 }
 
 function renderSchedule() {
-  const approved = state.sets.filter((item) => item.status === "approved");
+  const approved = state.sets.filter((item) => (item.kind || "daily") === "daily" && item.status === "approved");
   $("#scheduleSet").innerHTML = approved.length ? approved.map((item) =>
     `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("") : `<option value="">No approved sets</option>`;
   $("#scheduleSetButton").textContent = state.publisher.configured ? "Upload & schedule" : "Schedule locally";
-  const attempts = new Map(state.publishAttempts.map((item) => [item.release_date, item]));
+  const attempts = new Map();
+  state.publishAttempts.forEach((item) => {
+    if (!attempts.has(item.release_date)) attempts.set(item.release_date, item);
+  });
   const scheduled = new Map(state.schedule.map((item) => [item.release_date, item]));
   const dates = [...new Set([...scheduled.keys(), ...attempts.keys()])].sort();
   $("#scheduleList").innerHTML = dates.length ? dates.map((releaseDate) => {
     const item = scheduled.get(releaseDate);
     const attempt = attempts.get(releaseDate);
     const setItem = state.sets.find((value) => value.id === (item?.set_id || attempt?.set_id));
+    const remoteState = attempt?.remote_state || attempt?.state;
+    const statusLabels = { emergency_unavailable: "stopped", superseded: "replaced" };
+    const status = statusLabels[remoteState] || remoteState || (item?.is_published ? "published" : "midnight ET");
+    const canRemove = Boolean(item && !item.is_published && !attempt);
+    const easternToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+    const canStop = Boolean(attempt && remoteState === "scheduled" && releaseDate > easternToday);
     return `
     <div class="schedule-item">
       <strong>${escapeHtml(releaseDate)}</strong>
       <div>${escapeHtml(item?.set_name || setItem?.name || "Publish attempt")}${attempt?.error_summary ? `<small>${escapeHtml(attempt.error_summary)}</small>` : ""}</div>
-      <span class="pill ${escapeHtml(attempt?.state || "")}">${escapeHtml(attempt?.state || "midnight ET")}</span>
+      <div class="schedule-actions">
+        <span class="pill ${escapeHtml(remoteState || "")}">${escapeHtml(status)}</span>
+        ${canRemove ? `<button type="button" class="schedule-remove" data-remove-release-date="${escapeHtml(releaseDate)}">Remove</button>` : ""}
+        ${canStop ? `<button type="button" class="schedule-remove" data-stop-release-date="${escapeHtml(releaseDate)}">Stop release</button>` : ""}
+      </div>
     </div>`;
   }).join("") : `<p class="hint">Nothing scheduled.</p>`;
 }
 
+async function removeScheduledRelease(releaseDate) {
+  const item = state.schedule.find((entry) => entry.release_date === releaseDate);
+  if (!item) return;
+  const label = item.set_name || "this set";
+  if (!window.confirm(`Remove ${releaseDate} — ${label} from the release calendar?`)) return;
+  await api(`/api/schedule/${encodeURIComponent(releaseDate)}`, { method: "DELETE" });
+  await refreshData();
+  toast("Scheduled release removed");
+}
+
+async function stopScheduledRelease(releaseDate) {
+  const attempt = state.publishAttempts.find((entry) => entry.release_date === releaseDate);
+  const setItem = state.sets.find((item) => item.id === attempt?.set_id);
+  if (!window.confirm(`Stop ${releaseDate} — ${setItem?.name || "this set"} from going live at midnight?`)) return;
+  const reason = window.prompt("Reason for stopping this scheduled release:", "Content needs correction");
+  if (reason === null) return;
+  if (!reason.trim()) throw new Error("A reason is required to stop a scheduled release");
+  await api(`/api/releases/${encodeURIComponent(releaseDate)}/stop`, {
+    method: "POST",
+    body: JSON.stringify({ reason: reason.trim() }),
+  });
+  await refreshData();
+  toast("Scheduled release stopped; you can now upload a replacement for the same date");
+}
+
+$("#toggleLibrary").addEventListener("click", () => switchLibrary().catch((error) => toast(error.message)));
 $("#newSet").addEventListener("click", () => createSet().catch((error) => toast(error.message)));
 $("#emptyNewSet").addEventListener("click", () => createSet().catch((error) => toast(error.message)));
 $("#setList").addEventListener("click", async (event) => {
@@ -996,6 +1180,7 @@ $("#mapSelect").addEventListener("change", (event) => {
   state.current.mapAssetVersion = state.catalog.assetVersion;
   state.current.rounds.forEach((round) => {
     round.listenerPos = round.operatorStartPos = round.targetPos = null;
+    if ("guessPos" in round) round.guessPos = null;
   });
   state.floorKey = map?.floors[0]?.key || "";
   resetMapView();
@@ -1205,7 +1390,9 @@ $("#mapCanvas").addEventListener("keydown", (event) => {
 $("#mapZoomIn").addEventListener("click", () => zoomMapAt(mapView.zoom + .5));
 $("#mapZoomOut").addEventListener("click", () => zoomMapAt(mapView.zoom - .5));
 $("#clearRound").addEventListener("click", () => {
-  state.current.rounds[state.roundIndex] = { position: state.roundIndex + 1, operatorId: null, listenerPos: null, operatorStartPos: null, targetPos: null, captureId: null };
+  const round = { position: state.roundIndex + 1, operatorId: null, listenerPos: null, operatorStartPos: null, targetPos: null, captureId: null };
+  if (state.current.kind === "example") round.guessPos = null;
+  state.current.rounds[state.roundIndex] = round;
   renderEditor();
   scheduleDraftSave();
 });
@@ -1258,6 +1445,15 @@ $("#importDailySet").addEventListener("click", async () => {
   } catch (error) { toast(error.message); }
 });
 $("#showSchedule").addEventListener("click", () => $("#scheduleDialog").showModal());
+$("#scheduleList").addEventListener("click", (event) => {
+  const removeButton = event.target.closest("[data-remove-release-date]");
+  if (removeButton) {
+    removeScheduledRelease(removeButton.dataset.removeReleaseDate).catch((error) => toast(error.message));
+    return;
+  }
+  const stopButton = event.target.closest("[data-stop-release-date]");
+  if (stopButton) stopScheduledRelease(stopButton.dataset.stopReleaseDate).catch((error) => toast(error.message));
+});
 $("#scanDailySet").addEventListener("click", async () => {
   const directoryPath = $("#dailySetPath").value.trim();
   if (!directoryPath) {
@@ -1319,19 +1515,46 @@ $("#importCapture").addEventListener("click", async () => {
   } catch (error) { toast(error.message); }
 });
 $("#scheduleSetButton").addEventListener("click", async () => {
+  const button = $("#scheduleSetButton");
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = state.publisher.configured ? "Uploading & verifying…" : "Scheduling…";
   try {
     const endpoint = state.publisher.configured ? "/api/publish" : "/api/schedule";
-    await api(endpoint, { method: "POST", body: JSON.stringify({ releaseDate: $("#releaseDate").value, setId: $("#scheduleSet").value }) });
+    const releaseDate = $("#releaseDate").value;
+    const setId = $("#scheduleSet").value;
+    const selected = state.sets.find((item) => item.id === setId);
+    const existing = state.publishAttempts.find((item) => item.release_date === releaseDate && item.remote_release_version_id);
+    const remoteState = existing?.remote_state || existing?.state;
+    const isReplacement = Boolean(existing && ["scheduled", "released", "emergency_unavailable"].includes(remoteState)
+      && (remoteState === "emergency_unavailable" || existing.set_id !== setId || Number(existing.set_version) !== Number(selected?.version)));
+    let reason = null;
+    if (isReplacement) {
+      reason = window.prompt("Reason for replacing the existing release:", "Corrected scheduled daily set");
+      if (reason === null) return;
+      if (!reason.trim()) throw new Error("A reason is required to replace a remote release");
+      if (!window.confirm(`Replace the existing ${releaseDate} release with ${selected?.name || "this set"}?`)) return;
+    }
+    await api(endpoint, { method: "POST", body: JSON.stringify({ releaseDate, setId, reason }) });
     await refreshData();
     toast(state.publisher.configured ? "Nine media objects verified; release scheduled" : "Set scheduled locally for midnight ET");
-  } catch (error) { toast(error.message); }
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    renderSchedule();
+  }
 });
 $("#mapImage").addEventListener("load", resizeCanvas);
 new ResizeObserver(resizeCanvas).observe($("#mapStage"));
 
 async function start() {
   try {
-    state.catalog = await loadWideCatalog();
+    await assertServerCompatibility();
+    [state.catalog, state.scoring] = await Promise.all([
+      loadWideCatalog(),
+      loadScoringConfig("/game-assets/data/scoring.json"),
+    ]);
     fillMapSelect();
     const easternDate = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
     $("#releaseDate").value = easternDate;
@@ -1339,8 +1562,11 @@ async function start() {
     await refreshData();
     $("#status").textContent = `${state.catalog.maps.length} maps · ${state.catalog.operators.length} operators`;
   } catch (error) {
-    $("#status").textContent = "Studio unavailable";
-    toast(error.message);
+    const message = String(error?.message || error);
+    $("#status").textContent = message.includes("Restart Studio")
+      ? "Restart Studio, then refresh"
+      : "Studio unavailable";
+    toast(message);
   }
 }
 
