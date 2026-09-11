@@ -983,18 +983,64 @@ class Handler(BaseHTTPRequestHandler):
         if not candidate.is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        body = candidate.read_bytes()
+        size = candidate.stat().st_size
+        start = 0
+        end = size - 1
+        status = HTTPStatus.OK
+        range_header = self.headers.get("Range")
+        if range_header:
+            try:
+                if not range_header.startswith("bytes=") or "," in range_header:
+                    raise ValueError
+                bounds = range_header[len("bytes="):].strip()
+                first, last = bounds.split("-", 1)
+                if first:
+                    start = int(first)
+                    end = int(last) if last else size - 1
+                    if start < 0 or start >= size or end < start:
+                        raise ValueError
+                    end = min(end, size - 1)
+                else:
+                    suffix_length = int(last)
+                    if suffix_length <= 0 or size == 0:
+                        raise ValueError
+                    start = max(0, size - suffix_length)
+                    end = size - 1
+            except (TypeError, ValueError):
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = HTTPStatus.PARTIAL_CONTENT
+        content_length = end - start + 1 if size else 0
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(content_length))
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.send_header(
             "Cache-Control",
             "no-store" if no_store or candidate.suffix in {".html", ".js", ".mjs"}
             else "public, max-age=3600",
         )
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            with candidate.open("rb") as file:
+                file.seek(start)
+                remaining = content_length
+                while remaining:
+                    chunk = file.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # Browsers cancel obsolete byte-range downloads during rapid seeking.
+            return
 
     @staticmethod
     def _preview_parts(path: str) -> tuple[str, str] | None:
