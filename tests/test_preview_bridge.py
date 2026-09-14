@@ -38,6 +38,7 @@ class PreviewBridgeTests(unittest.TestCase):
                     "listenerPos": {**point, "angle": slot * 90},
                     "operatorStartPos": point,
                     "targetPos": {**point, "x": 0.7},
+                    "alternateTargetFloorKey": "2f" if slot == 1 else None,
                     "captureId": f"1-bank/{slot}",
                 }
                 for slot in (1, 2, 3)
@@ -64,11 +65,14 @@ class PreviewBridgeTests(unittest.TestCase):
         (self.game_repo / "assets" / "maps" / "blueprint_manifest_wide_upscaled.json").write_text(
             json.dumps({
                 "settings": {"refreshedAt": "test-assets"},
-                "images": [{
-                    "map_slug": "bank", "floor_key": "1f", "selector_enabled": True,
-                    "output_file": "bank.png", "wide_crop_box": [0, 0, 100, 100],
-                    "square_crop_box": [0, 0, 100, 100],
-                }],
+                "images": [
+                    {
+                        "map_slug": "bank", "floor_key": floor_key, "selector_enabled": True,
+                        "output_file": f"bank-{floor_key}.png", "wide_crop_box": [0, 0, 100, 100],
+                        "square_crop_box": [0, 0, 100, 100],
+                    }
+                    for floor_key in ("1f", "2f")
+                ],
             }),
             encoding="utf-8",
         )
@@ -91,6 +95,7 @@ class PreviewBridgeTests(unittest.TestCase):
         self.assertEqual([], contract["issues"])
         self.assertTrue(contract["puzzle"]["rounds"][0]["evidenceImageUrl"].endswith("/listener.jpg"))
         self.assertTrue(contract["puzzle"]["rounds"][0]["videoUrl"].startswith(f"/preview/{session.token}/media/"))
+        self.assertEqual("2f", contract["puzzle"]["rounds"][0]["alternateTargetFloorKey"])
 
         changed = self.store.get_set(self.item["id"])
         changed["name"] = "Changed later"

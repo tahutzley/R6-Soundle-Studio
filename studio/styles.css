@@ -59,6 +59,7 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 input, select { width: 100%; min-height: 42px; padding: .67rem .75rem; }
 select { appearance: none; padding-right: 46px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='m6 8 4 4 4-4' fill='none' stroke='%23a2adb8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-position: right 15px center; background-repeat: no-repeat; background-size: 18px; }
 label, .field-label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 700; letter-spacing: .075em; text-transform: uppercase; }
+.field-help { color: var(--dim); font-size: .68rem; font-weight: 400; letter-spacing: 0; line-height: 1.25; text-transform: none; }
 h1, h2, p { margin-top: 0; }
 h1, h2 { font-family: "Oswald", "D-DIN Condensed", sans-serif; }
 h1 { margin: 0; font-size: 1rem; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
@@ -273,6 +274,10 @@ dialog::backdrop { background: #020407d1; backdrop-filter: blur(4px); }
 .legacy-import { margin: 14px 0 18px; color: var(--muted); font-size: .8rem; }
 .legacy-import summary { cursor: pointer; }
 .publication-list { display: grid; gap: 8px; max-height: 58vh; margin-top: 12px; overflow: auto; }
+.publish-status { display: grid; gap: 3px; margin: -6px 0 16px; padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--blue); background: var(--bg-void); }
+.publish-status[hidden] { display: none; }
+.publish-status[data-state="error"] { border-left-color: var(--red); }
+.publish-status span { color: var(--muted); font-size: .78rem; }
 .publication-item small { display: block; margin-top: .3rem; color: var(--muted); }
 .publication-item { display: grid; grid-template-columns: 1fr auto; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--line); }
 .publication-item button { align-self: center; }

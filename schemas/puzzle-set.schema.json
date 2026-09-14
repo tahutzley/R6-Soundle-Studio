@@ -48,6 +48,7 @@
         "listenerPos": { "anyOf": [{ "$ref": "#/$defs/position" }, { "type": "null" }] },
         "operatorStartPos": { "anyOf": [{ "$ref": "#/$defs/position" }, { "type": "null" }] },
         "targetPos": { "anyOf": [{ "$ref": "#/$defs/position" }, { "type": "null" }] },
+        "alternateTargetFloorKey": { "type": ["string", "null"], "minLength": 1, "description": "Optional second floor accepted for a runner end placed between floors, using the target position's coordinates." },
         "guessPos": { "anyOf": [{ "$ref": "#/$defs/position" }, { "type": "null" }], "description": "Authored result guess used only by How to Play examples." },
         "captureId": { "type": ["string", "null"] }
       }

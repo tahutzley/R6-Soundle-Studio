@@ -69,7 +69,8 @@
         "replayVideoUrl": { "type": ["string", "null"] },
         "listenerPos": { "$ref": "#/$defs/position" },
         "operatorStartPos": { "$ref": "#/$defs/position" },
-        "targetPos": { "$ref": "#/$defs/position" }
+        "targetPos": { "$ref": "#/$defs/position" },
+        "alternateTargetFloorKey": { "type": ["string", "null"], "minLength": 1 }
       }
     },
     "puzzle": {

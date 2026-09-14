@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#07090d">
     <title>R6 Soundle Studio</title>
-    <link rel="stylesheet" href="/styles.css?v=20260903-audio-seek">
+    <link rel="stylesheet" href="/styles.css?v=20260914-publish-progress">
   </head>
   <body>
     <header class="topbar">
@@ -125,6 +125,11 @@
                 </div>
               </div>
               <label><span>Processed capture</span><select id="captureSelect"></select></label>
+              <label class="alternate-floor-field">
+                <span>Runner end also counts on</span>
+                <select id="alternateTargetFloor"></select>
+                <small class="field-help">Optional for staircase endpoints that belong to either blueprint.</small>
+              </label>
 
               <div class="capture-preview" id="capturePreview">
                 <div class="preview-empty">Attach a processed capture</div>
@@ -184,6 +189,7 @@
           <select id="publishSet"></select>
           <button type="button" class="primary" id="publishSetButton">Upload to production</button>
         </div>
+        <div id="publishStatus" class="publish-status" aria-live="polite" hidden></div>
         <p class="hint" id="publisherUnavailable" hidden>Production publishing is not configured. Set the production publisher URL and credential, then restart Studio.</p>
         <h3>Live production challenges</h3>
         <p class="hint">Remove immediately hides a challenge and blocks its media. Its audit history is retained.</p>
@@ -192,6 +198,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status"></div>
-    <script type="module" src="/app.js?v=20260913-production-remove"></script>
+    <script type="module" src="/app.js?v=20260914-api-v6"></script>
   </body>
 </html>

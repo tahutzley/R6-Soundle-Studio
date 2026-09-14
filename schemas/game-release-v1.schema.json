@@ -79,7 +79,8 @@
             { "$ref": "#/$defs/position" },
             { "type": "object" }
           ]
-        }
+        },
+        "alternateTargetFloorKey": { "type": ["string", "null"], "minLength": 1 }
       }
     },
     "puzzle": {
@@ -97,4 +98,3 @@
     }
   }
 }
-

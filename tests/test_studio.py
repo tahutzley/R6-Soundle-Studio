@@ -142,6 +142,34 @@ class StudioStoreTests(unittest.TestCase):
         )
         self.assertNotIn("guessPos", item["rounds"][0])
 
+    def test_alternate_runner_end_floor_persists_and_must_be_distinct(self) -> None:
+        for position in range(1, 4):
+            self.make_capture(f"capture-{position}")
+        rounds = [
+            self.complete_round(position, f"1-bank/{position}")
+            for position in range(1, 4)
+        ]
+        rounds[0]["alternateTargetFloorKey"] = "2f"
+
+        item = self.store.save_set({
+            "name": "Staircase set",
+            "mapSlug": "bank",
+            "rounds": rounds,
+        })
+
+        self.assertEqual("2f", item["rounds"][0]["alternateTargetFloorKey"])
+        item["status"] = "approved"
+        item = self.store.save_set(item, item["id"])
+        self.assertEqual("approved", item["status"])
+        self.assertEqual("2f", item["rounds"][0]["alternateTargetFloorKey"])
+
+        item["rounds"][0]["alternateTargetFloorKey"] = "1f"
+        errors = validate_set(item, {})
+        self.assertIn(
+            "Round 1: alternate runner-end floor must differ from the marked floor",
+            errors,
+        )
+
     def test_phase6_publish_fields_are_additive_and_inert(self) -> None:
         with self.store.connect() as connection:
             self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
