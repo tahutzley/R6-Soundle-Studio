@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://r6soundle.example/contracts/publish-v2.schema.json",
+  "title": "R6 Soundle immediate challenge publish request v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "publishMode", "authoringSetId", "studioSetVersion", "schemaVersion",
+    "scoringVersion", "mapAssetVersion", "snapshot", "media"
+  ],
+  "properties": {
+    "publishMode": { "const": "immediate" },
+    "authoringSetId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "studioSetVersion": { "type": "integer", "minimum": 1 },
+    "schemaVersion": { "const": 2 },
+    "scoringVersion": { "type": "integer", "minimum": 1 },
+    "mapAssetVersion": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["puzzle"],
+      "properties": {
+        "puzzle": {
+          "type": "object",
+          "required": ["mapName", "mapSlug", "floors", "rounds"],
+          "properties": {
+            "mapName": { "type": "string", "minLength": 1 },
+            "mapSlug": { "type": "string", "minLength": 1 },
+            "floors": { "type": "array", "minItems": 1 },
+            "rounds": { "type": "array", "minItems": 3, "maxItems": 3 }
+          }
+        }
+      }
+    },
+    "media": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["position", "kind", "sha256", "byteSize", "mimeType"],
+        "properties": {
+          "position": { "type": "integer", "minimum": 1, "maximum": 3 },
+          "kind": { "enum": ["listener_still", "listener_audio", "replay_video"] },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "byteSize": { "type": "integer", "minimum": 1 },
+          "mimeType": { "enum": ["image/jpeg", "audio/mp4", "video/mp4"] }
+        }
+      }
+    }
+  }
+}

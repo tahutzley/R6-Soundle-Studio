@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#07090d">
     <title>R6 Soundle Studio</title>
-    <link rel="stylesheet" href="/styles.css?v=20260901-p2j">
+    <link rel="stylesheet" href="/styles.css?v=20260903-audio-seek">
   </head>
   <body>
     <header class="topbar">
@@ -29,7 +29,7 @@
         <div id="setList" class="set-list"></div>
         <div class="sidebar-footer" id="sidebarFooter">
           <button id="showImport">Import daily set</button>
-          <button id="showSchedule">Release calendar</button>
+          <button id="showPublish">Upload to production</button>
         </div>
       </aside>
 
@@ -159,7 +159,7 @@
           <label><span>Attach to draft</span><select id="importTargetSet"></select></label>
           <label id="staleConfirmation" class="stale-confirmation" hidden>
             <input type="checkbox" id="allowStaleImport">
-            <span>I understand the scheduled draft becomes stale and must be reviewed, approved, and rescheduled.</span>
+            <span>I understand the published draft becomes stale and must be reviewed, approved, and uploaded again.</span>
           </label>
           <button type="button" class="primary" id="commitDailySet">Import three rounds</button>
         </div>
@@ -173,23 +173,25 @@
       </form>
     </dialog>
 
-    <dialog id="scheduleDialog">
+    <dialog id="publishDialog">
       <form method="dialog" class="dialog-card narrow">
         <div class="section-title">
-          <div><p class="eyebrow">RELEASES</p><h2>Calendar</h2></div>
+          <div><p class="eyebrow">PRODUCTION</p><h2>Publish challenge</h2></div>
           <button class="icon-button" value="cancel">×</button>
         </div>
-        <p>Approved sets upload nine immutable media objects, verify them, and schedule for midnight America/New_York. Interrupted uploads resume from this calendar.</p>
-        <div class="inline-form three">
-          <input type="date" id="releaseDate">
-          <select id="scheduleSet"></select>
-          <button type="button" class="primary" id="scheduleSetButton">Schedule</button>
+        <p>Choose an approved set. Studio uploads and verifies its nine media objects, then adds it to the production challenge library immediately.</p>
+        <div class="inline-form">
+          <select id="publishSet"></select>
+          <button type="button" class="primary" id="publishSetButton">Upload to production</button>
         </div>
-        <div id="scheduleList" class="schedule-list"></div>
+        <p class="hint" id="publisherUnavailable" hidden>Production publishing is not configured. Set the production publisher URL and credential, then restart Studio.</p>
+        <h3>Live production challenges</h3>
+        <p class="hint">Remove immediately hides a challenge and blocks its media. Its audit history is retained.</p>
+        <div id="publishList" class="publication-list"></div>
       </form>
     </dialog>
 
     <div class="toast" id="toast" role="status"></div>
-    <script type="module" src="/app.js?v=20260901-p9"></script>
+    <script type="module" src="/app.js?v=20260913-production-remove"></script>
   </body>
 </html>

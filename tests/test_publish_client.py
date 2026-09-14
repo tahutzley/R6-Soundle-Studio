@@ -83,6 +83,18 @@ class InProcessPublisherClient:
             )
         )
 
+    def list_challenges(self):
+        return self._value(self.client.get("/api/v1/challenges"))
+
+    def remove_challenge(self, challenge_id, reason, idempotency_key):
+        return self._value(
+            self.client.post(
+                f"/admin/v1/challenges/{challenge_id}/unavailable",
+                headers={"Idempotency-Key": idempotency_key},
+                json={"reason": reason},
+            )
+        )
+
 
 class StudioPublishClientTests(unittest.TestCase):
     def test_remote_client_requires_bearer_and_https_outside_loopback(self) -> None:
@@ -93,15 +105,23 @@ class StudioPublishClientTests(unittest.TestCase):
         client = PublisherClient("https://publisher.example.invalid", "test-publisher-token-value")
         self.assertEqual(client.bearer_token, "test-publisher-token-value")
 
-    def test_vendored_publish_contract_matches_game_authority(self) -> None:
-        authority = json.loads((GAME_ROOT / "contracts" / "publish-v1.schema.json").read_text(encoding="utf-8"))
-        vendored = json.loads((STUDIO_ROOT / "schemas" / "game-publish-v1.schema.json").read_text(encoding="utf-8"))
-        source = json.loads((STUDIO_ROOT / "schemas" / "game-publish-v1.source.json").read_text(encoding="utf-8"))
-        canonical = json.dumps(authority, sort_keys=True, separators=(",", ":")).encode()
-        self.assertEqual(vendored, authority)
-        self.assertEqual(hashlib.sha256(canonical).hexdigest(), source["canonicalJsonSha256"])
+    def test_vendored_publish_contracts_match_game_authority(self) -> None:
+        for version in (1, 2):
+            with self.subTest(version=version):
+                authority = json.loads(
+                    (GAME_ROOT / "contracts" / f"publish-v{version}.schema.json").read_text(encoding="utf-8")
+                )
+                vendored = json.loads(
+                    (STUDIO_ROOT / "schemas" / f"game-publish-v{version}.schema.json").read_text(encoding="utf-8")
+                )
+                source = json.loads(
+                    (STUDIO_ROOT / "schemas" / f"game-publish-v{version}.source.json").read_text(encoding="utf-8")
+                )
+                canonical = json.dumps(authority, sort_keys=True, separators=(",", ":")).encode()
+                self.assertEqual(vendored, authority)
+                self.assertEqual(hashlib.sha256(canonical).hexdigest(), source["canonicalJsonSha256"])
 
-    def _workflow(self, interrupt_after: int) -> None:
+    def _workflow(self, interrupt_after: int, *, immediate: bool = False) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             store = Store(root / "studio.db")
@@ -163,12 +183,14 @@ class StudioPublishClientTests(unittest.TestCase):
                 storage=storage,
                 clock=lambda: now,
             )
-            client = InProcessPublisherClient(
-                TestClient(game, headers={"Authorization": f"Bearer {PUBLISHER_TOKEN}"})
-            )
+            test_client = TestClient(game, headers={"Authorization": f"Bearer {PUBLISHER_TOKEN}"})
+            client = InProcessPublisherClient(test_client)
             publisher = StudioPublisher(store, catalog, 5, client, now=lambda: now)
             with self.assertRaises(PublishInterrupted):
-                publisher.publish("2026-09-02", approved["id"], interrupt_after=interrupt_after)
+                if immediate:
+                    publisher.publish_immediately(approved["id"], interrupt_after=interrupt_after)
+                else:
+                    publisher.publish("2026-09-02", approved["id"], interrupt_after=interrupt_after)
             interrupted = publisher.list_attempts()[0]
             self.assertEqual(interrupted["state"], "uploading")
             self.assertEqual(client.prepare_calls, 1)
@@ -179,19 +201,40 @@ class StudioPublishClientTests(unittest.TestCase):
                 self.assertNotIn('"upload"', persisted)
 
             restarted = StudioPublisher(store, catalog, 5, client, now=lambda: now)
-            completed = restarted.publish("2026-09-02", approved["id"])
+            completed = (
+                restarted.publish_immediately(approved["id"])
+                if immediate
+                else restarted.publish("2026-09-02", approved["id"])
+            )
             self.assertEqual(completed["state"], "scheduled")
             self.assertEqual(client.prepare_calls, 1)
             self.assertEqual(client.upload_calls, 9)
             self.assertIsNotNone(completed["remote_release_id"])
             self.assertIsNotNone(completed["remote_release_version_id"])
-            self.assertEqual(store.get_schedule_entry("2026-09-02")["set_version"], approved["version"])
+            release_date = completed["release_date"]
+            self.assertEqual(store.get_schedule_entry(release_date)["set_version"], approved["version"])
             with store.connect() as connection:
                 published = connection.execute(
-                    "SELECT * FROM published_releases WHERE release_date='2026-09-02'"
+                    "SELECT * FROM published_releases WHERE release_date=?", (release_date,)
                 ).fetchone()
                 self.assertEqual(published["remote_release_id"], completed["remote_release_id"])
-            if interrupt_after == 1:
+            if immediate:
+                self.assertEqual(completed["remote_state"], "released")
+                challenges = restarted.list_remote_challenges()["challenges"]
+                self.assertEqual(len(challenges), 1)
+                self.assertEqual(test_client.get(f"/api/v1/challenges/{challenges[0]['id']}").status_code, 200)
+                removed = restarted.remove_challenge(
+                    challenges[0]["id"], "Remove from production in Studio test"
+                )
+                self.assertEqual(removed["state"], "emergency_unavailable")
+                self.assertEqual(restarted.list_remote_challenges()["challenges"], [])
+                local = restarted.get_attempt(completed["id"])
+                self.assertEqual(local["remote_state"], "emergency_unavailable")
+                self.assertEqual(
+                    test_client.get(f"/api/v1/challenges/{challenges[0]['id']}").status_code,
+                    404,
+                )
+            elif interrupt_after == 1:
                 stopped = restarted.stop_scheduled("2026-09-02", "content needs correction")
                 self.assertEqual(stopped["remote_state"], "emergency_unavailable")
                 self.assertEqual(stopped["transition_reason"], "content needs correction")
@@ -222,6 +265,9 @@ class StudioPublishClientTests(unittest.TestCase):
         for count in (1, 5, 9):
             with self.subTest(interrupt_after=count):
                 self._workflow(count)
+
+    def test_immediate_publish_resumes_and_is_live_without_a_date(self) -> None:
+        self._workflow(5, immediate=True)
 
     def test_stale_map_assets_block_before_remote_prepare(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

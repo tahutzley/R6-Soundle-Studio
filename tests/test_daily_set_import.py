@@ -5,7 +5,9 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from http import HTTPStatus
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from studio_import import DailySetImportError, DailySetImporter, ScanChangedError
@@ -277,6 +279,26 @@ class DailySetImportTests(unittest.TestCase):
             result = post("/api/imports/commit", {"scanId": scan["scanId"]})
             with urlopen(f"http://127.0.0.1:{server.server_port}/media/1-bank%2F1/listener.jpg") as media_response:
                 media_body = media_response.read()
+                accept_ranges = media_response.headers["Accept-Ranges"]
+            replay_body = b"video:1:original"
+            range_request = Request(
+                f"http://127.0.0.1:{server.server_port}/media/1-bank%2F1/replay.mp4",
+                headers={"Range": "bytes=2-7"},
+            )
+            with urlopen(range_request) as range_response:
+                range_body = range_response.read()
+                range_status = range_response.status
+                content_range = range_response.headers["Content-Range"]
+                range_length = range_response.headers["Content-Length"]
+            invalid_range = Request(
+                f"http://127.0.0.1:{server.server_port}/media/1-bank%2F1/replay.mp4",
+                headers={"Range": "bytes=999-1000"},
+            )
+            with self.assertRaises(HTTPError) as invalid_response:
+                urlopen(invalid_range)
+            invalid_status = invalid_response.exception.code
+            invalid_content_range = invalid_response.exception.headers["Content-Range"]
+            invalid_response.exception.close()
         finally:
             server.shutdown()
             server.server_close()
@@ -286,6 +308,13 @@ class DailySetImportTests(unittest.TestCase):
         self.assertEqual("success", result["state"])
         self.assertEqual("available", result["captures"][0]["status"])
         self.assertEqual(b"jpeg:1:original", media_body)
+        self.assertEqual("bytes", accept_ranges)
+        self.assertEqual(HTTPStatus.PARTIAL_CONTENT, range_status)
+        self.assertEqual(replay_body[2:8], range_body)
+        self.assertEqual(f"bytes 2-7/{len(replay_body)}", content_range)
+        self.assertEqual("6", range_length)
+        self.assertEqual(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, invalid_status)
+        self.assertEqual(f"bytes */{len(replay_body)}", invalid_content_range)
         self.assertEqual((3, 1), self.counts())
 
 

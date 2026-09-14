@@ -45,7 +45,7 @@ LOCAL_ENV_KEYS = frozenset({
     "R6_STUDIO_PUBLISHER_TOKEN",
 })
 PREVIEW_SCHEMA_VERSION = 1
-STUDIO_API_VERSION = 4
+STUDIO_API_VERSION = 5
 PREVIEW_TTL = timedelta(minutes=30)
 EASTERN = ZoneInfo("America/New_York")
 GAME_PREVIEW_ASSET_PREFIXES = (
@@ -983,18 +983,64 @@ class Handler(BaseHTTPRequestHandler):
         if not candidate.is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        body = candidate.read_bytes()
+        size = candidate.stat().st_size
+        start = 0
+        end = size - 1
+        status = HTTPStatus.OK
+        range_header = self.headers.get("Range")
+        if range_header:
+            try:
+                if not range_header.startswith("bytes=") or "," in range_header:
+                    raise ValueError
+                bounds = range_header[len("bytes="):].strip()
+                first, last = bounds.split("-", 1)
+                if first:
+                    start = int(first)
+                    end = int(last) if last else size - 1
+                    if start < 0 or start >= size or end < start:
+                        raise ValueError
+                    end = min(end, size - 1)
+                else:
+                    suffix_length = int(last)
+                    if suffix_length <= 0 or size == 0:
+                        raise ValueError
+                    start = max(0, size - suffix_length)
+                    end = size - 1
+            except (TypeError, ValueError):
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            status = HTTPStatus.PARTIAL_CONTENT
+        content_length = end - start + 1 if size else 0
         content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(content_length))
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.send_header(
             "Cache-Control",
             "no-store" if no_store or candidate.suffix in {".html", ".js", ".mjs"}
             else "public, max-age=3600",
         )
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            with candidate.open("rb") as file:
+                file.seek(start)
+                remaining = content_length
+                while remaining:
+                    chunk = file.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # Browsers cancel obsolete byte-range downloads during rapid seeking.
+            return
 
     @staticmethod
     def _preview_parts(path: str) -> tuple[str, str] | None:
@@ -1083,6 +1129,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"configured": self.app.publisher is not None})
             elif path == "/api/publish-attempts":
                 self._json(self.app.publisher.list_attempts() if self.app.publisher else [])
+            elif path == "/api/production/challenges":
+                if not self.app.publisher:
+                    self._json({"available": False, "challenges": []})
+                    return
+                try:
+                    catalog = self.app.publisher.list_remote_challenges()
+                    self._json({**catalog, "available": True})
+                except PublishClientError as error:
+                    self._json({"available": False, "challenges": [], "error": str(error)})
             elif path.startswith("/api/puzzles/"):
                 item = self.app.store.public_puzzle(path.rsplit("/", 1)[1])
                 self._json(item or {"error": "Puzzle is not released"}, 200 if item else 404)
@@ -1156,8 +1211,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.app.publisher:
                     self._json({"error": "Remote publisher is not configured"}, 409)
                     return
-                release_date = str(payload["releaseDate"])
                 set_id = str(payload["setId"])
+                if not payload.get("releaseDate"):
+                    self._json(self.app.publisher.publish_immediately(set_id), 201)
+                    return
+                release_date = str(payload["releaseDate"])
                 existing = self.app.publisher.latest_release_attempt(release_date)
                 expected_revision = None
                 reason = None
@@ -1192,6 +1250,19 @@ class Handler(BaseHTTPRequestHandler):
                 release_date = unquote(path.removeprefix("/api/releases/").removesuffix("/stop").rstrip("/"))
                 self._json(
                     self.app.publisher.stop_scheduled(release_date, str(payload.get("reason") or ""))
+                )
+            elif path.startswith("/api/production/challenges/") and path.endswith("/remove"):
+                if not self.app.publisher:
+                    self._json({"error": "Remote publisher is not configured"}, 409)
+                    return
+                challenge_id = unquote(
+                    path.removeprefix("/api/production/challenges/").removesuffix("/remove").rstrip("/")
+                )
+                self._json(
+                    self.app.publisher.remove_challenge(
+                        challenge_id,
+                        str(payload.get("reason") or ""),
+                    )
                 )
             elif path == "/api/releases/publish-due":
                 self._json({"published": self.app.store.publish_due()})
