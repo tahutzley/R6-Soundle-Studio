@@ -311,6 +311,12 @@ non-secret test bearer token. It never opens `studio.db`, `daily sets`, `videos`
 `media/raw`, `media/processed`, `.env`, or `config.local.json` from an owner
 workspace.
 
+Feature branches that change a shared game contract must use the same branch
+name in both repositories. Push the game branch first, then the Studio branch;
+Studio CI checks out the matching game branch so contract drift and the
+in-process publisher simulation validate the paired changes rather than the
+game's default branch.
+
 Phase 10's entry point is `tools/run_launch_rehearsal.py` in the sibling game
 repository. `rehearsal_support.py` owns Studio's synthetic-only portion: it
 creates named fake recordings under the caller's temporary root, drives the
