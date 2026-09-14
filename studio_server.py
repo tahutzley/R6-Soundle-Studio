@@ -45,7 +45,7 @@ LOCAL_ENV_KEYS = frozenset({
     "R6_STUDIO_PUBLISHER_TOKEN",
 })
 PREVIEW_SCHEMA_VERSION = 1
-STUDIO_API_VERSION = 5
+STUDIO_API_VERSION = 6
 PREVIEW_TTL = timedelta(minutes=30)
 EASTERN = ZoneInfo("America/New_York")
 GAME_PREVIEW_ASSET_PREFIXES = (
@@ -191,6 +191,7 @@ def empty_round(position: int, *, include_guess: bool = False) -> dict[str, Any]
         "listenerPos": None,
         "operatorStartPos": None,
         "targetPos": None,
+        "alternateTargetFloorKey": None,
         "captureId": None,
     }
     if include_guess:
@@ -212,7 +213,10 @@ def normalize_set(payload: dict[str, Any], existing: dict[str, Any] | None = Non
     for position in range(1, round_count + 1):
         source = rounds_by_position.get(position, {})
         item = empty_round(position, include_guess=kind == "example")
-        for key in ("operatorId", "listenerPos", "operatorStartPos", "targetPos", "captureId"):
+        for key in (
+            "operatorId", "listenerPos", "operatorStartPos", "targetPos",
+            "alternateTargetFloorKey", "captureId",
+        ):
             item[key] = source.get(key)
         if kind == "example":
             item["guessPos"] = source.get("guessPos")
@@ -271,6 +275,15 @@ def validate_set(item: dict[str, Any], captures: dict[str, dict[str, Any]]) -> l
         ):
             if not position_is_valid(round_item.get(key)):
                 errors.append(f"{prefix}: {label} is required")
+        alternate_floor = round_item.get("alternateTargetFloorKey")
+        if alternate_floor is not None:
+            if not isinstance(alternate_floor, str) or not alternate_floor.strip():
+                errors.append(f"{prefix}: alternate runner-end floor is invalid")
+            elif (
+                position_is_valid(round_item.get("targetPos"))
+                and alternate_floor == round_item["targetPos"]["floorKey"]
+            ):
+                errors.append(f"{prefix}: alternate runner-end floor must differ from the marked floor")
         if item.get("kind") == "example" and not position_is_valid(round_item.get("guessPos")):
             errors.append(f"{prefix}: example guess is required")
         capture_id = round_item.get("captureId")
@@ -843,6 +856,7 @@ class PreviewSessions:
                 "listenerPos": source.get("listenerPos") if position_is_valid(source.get("listenerPos")) else None,
                 "operatorStartPos": source.get("operatorStartPos") if position_is_valid(source.get("operatorStartPos")) else None,
                 "targetPos": source.get("targetPos") if position_is_valid(source.get("targetPos")) else None,
+                "alternateTargetFloorKey": source.get("alternateTargetFloorKey"),
             })
         while len(rounds) < 3:
             index = len(rounds) + 1
@@ -855,6 +869,7 @@ class PreviewSessions:
                 "position": index, "operatorId": None, "evidenceImageUrl": None, "videoUrl": None,
                 "replayVideoUrl": None, "listenerPos": None,
                 "operatorStartPos": None, "targetPos": None,
+                "alternateTargetFloorKey": None,
             })
         contract = {
             "kind": "r6-soundle-preview",

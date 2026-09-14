@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -107,19 +108,27 @@ class PublisherClient:
 
     def upload(self, authorization: Mapping[str, Any], path: Path) -> None:
         url = urljoin(self.base_url, str(authorization["url"]))
-        try:
-            with path.open("rb") as body:
-                request = Request(
-                    url,
-                    data=body,  # type: ignore[arg-type]
-                    headers={str(key): str(value) for key, value in dict(authorization.get("headers") or {}).items()},
-                    method=str(authorization.get("method") or "PUT"),
-                )
-                with urlopen(request, timeout=self.timeout_seconds) as response:
-                    if response.status >= 300:
-                        raise PublishClientError(f"Upload returned HTTP {response.status}")
-        except (HTTPError, URLError, TimeoutError) as error:
-            raise PublishClientError(f"Media upload failed: {error}") from error
+        for attempt, retry_delay in enumerate((0.5, 1.0, None), start=1):
+            try:
+                with path.open("rb") as body:
+                    request = Request(
+                        url,
+                        data=body,  # type: ignore[arg-type]
+                        headers={str(key): str(value) for key, value in dict(authorization.get("headers") or {}).items()},
+                        method=str(authorization.get("method") or "PUT"),
+                    )
+                    with urlopen(request, timeout=self.timeout_seconds) as response:
+                        if response.status >= 300:
+                            raise PublishClientError(f"Upload returned HTTP {response.status}")
+                return
+            except HTTPError as error:
+                raise PublishClientError(f"Media upload failed: {error}") from error
+            except (URLError, TimeoutError) as error:
+                if retry_delay is None:
+                    raise PublishClientError(
+                        f"Media upload failed after {attempt} attempts: {error}"
+                    ) from error
+                time.sleep(retry_delay)
 
     def verify(self, attempt_id: str) -> dict[str, Any]:
         return self._request("POST", f"/admin/v1/publish-attempts/{attempt_id}/verify")
@@ -253,6 +262,7 @@ class StudioPublisher:
                     "listenerPos": source["listenerPos"],
                     "operatorStartPos": source["operatorStartPos"],
                     "targetPos": source["targetPos"],
+                    "alternateTargetFloorKey": source.get("alternateTargetFloorKey"),
                 }
             )
         floors = [
@@ -266,6 +276,13 @@ class StudioPublisher:
             }
             for floor in map_item["floors"]
         ]
+        floor_keys = {floor["key"] for floor in floors}
+        for position, round_item in enumerate(rounds, start=1):
+            alternate_floor = round_item.get("alternateTargetFloorKey")
+            if alternate_floor is not None and alternate_floor not in floor_keys:
+                raise ValueError(
+                    f"Round {position} alternate runner-end floor is not available on this map"
+                )
         puzzle = {
             "mapName": item.get("mapName") or map_item["name"],
             "mapSlug": item["mapSlug"],
@@ -573,7 +590,8 @@ class StudioPublisher:
                 )
             if remote.get("state") == "scheduled":
                 return self._complete_local(decoded, remote, bundle)
-            self._update_attempt(decoded["id"], state="uploading", objects_json=remote["objects"])
+            local_objects = [dict(value) for value in remote["objects"]]
+            self._update_attempt(decoded["id"], state="uploading", objects_json=local_objects)
             uploaded = 0
             for item in remote["objects"]:
                 if item["status"] == "verified":
@@ -583,7 +601,6 @@ class StudioPublisher:
                     raise PublishClientError("Publisher omitted upload authorization for pending media")
                 self.client.upload(authorization, bundle.paths[(int(item["position"]), str(item["kind"]))])
                 uploaded += 1
-                local_objects = [dict(value) for value in remote["objects"]]
                 next(value for value in local_objects if value["id"] == item["id"])["status"] = "uploaded"
                 self._update_attempt(decoded["id"], objects_json=local_objects)
                 if interrupt_after is not None and uploaded == interrupt_after:

@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
+from urllib.error import URLError
 from urllib.parse import urlsplit
 
 from fastapi.testclient import TestClient
@@ -105,6 +107,38 @@ class StudioPublishClientTests(unittest.TestCase):
         client = PublisherClient("https://publisher.example.invalid", "test-publisher-token-value")
         self.assertEqual(client.bearer_token, "test-publisher-token-value")
 
+    def test_media_upload_retries_transient_network_failures(self) -> None:
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with tempfile.TemporaryDirectory() as temporary:
+            media = Path(temporary) / "listener.jpg"
+            media.write_bytes(b"media")
+            client = PublisherClient(
+                "https://publisher.example.invalid",
+                "test-publisher-token-value",
+            )
+            with (
+                patch(
+                    "studio_publish.urlopen",
+                    side_effect=[URLError(OSError(11002, "getaddrinfo failed")), Response()],
+                ) as request,
+                patch("studio_publish.time.sleep") as sleep,
+            ):
+                client.upload(
+                    {"url": "https://s3.example.invalid/object", "method": "PUT", "headers": {}},
+                    media,
+                )
+
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
     def test_vendored_publish_contracts_match_game_authority(self) -> None:
         for version in (1, 2):
             with self.subTest(version=version):
@@ -142,6 +176,14 @@ class StudioPublishClientTests(unittest.TestCase):
                                 "pixelsPerMeter": 40,
                                 "coordinateSize": 2048,
                                 "coordinateFrame": {"x": 0, "y": 0, "width": 1, "height": 1},
+                            },
+                            {
+                                "key": "2f",
+                                "label": "2F",
+                                "imageUrl": "/game-assets/maps/wide-upscaled/bank-2f.png",
+                                "pixelsPerMeter": 40,
+                                "coordinateSize": 2048,
+                                "coordinateFrame": {"x": 0, "y": 0, "width": 1, "height": 1},
                             }
                         ],
                     }
@@ -159,6 +201,7 @@ class StudioPublishClientTests(unittest.TestCase):
                 }
                 for position in range(1, 4)
             ]
+            rounds[0]["alternateTargetFloorKey"] = "2f"
             draft = store.save_set(
                 {
                     "name": "Phase 6 set",
@@ -194,6 +237,10 @@ class StudioPublishClientTests(unittest.TestCase):
             interrupted = publisher.list_attempts()[0]
             self.assertEqual(interrupted["state"], "uploading")
             self.assertEqual(client.prepare_calls, 1)
+            self.assertEqual(
+                sum(item["status"] == "uploaded" for item in interrupted["objects"]),
+                interrupt_after,
+            )
             with store.connect() as connection:
                 persisted = connection.execute(
                     "SELECT objects_json FROM publish_attempts WHERE id=?", (interrupted["id"],)
@@ -222,7 +269,12 @@ class StudioPublishClientTests(unittest.TestCase):
                 self.assertEqual(completed["remote_state"], "released")
                 challenges = restarted.list_remote_challenges()["challenges"]
                 self.assertEqual(len(challenges), 1)
-                self.assertEqual(test_client.get(f"/api/v1/challenges/{challenges[0]['id']}").status_code, 200)
+                challenge = test_client.get(f"/api/v1/challenges/{challenges[0]['id']}")
+                self.assertEqual(challenge.status_code, 200)
+                self.assertEqual(
+                    challenge.json()["puzzle"]["rounds"][0]["alternateTargetFloorKey"],
+                    "2f",
+                )
                 removed = restarted.remove_challenge(
                     challenges[0]["id"], "Remove from production in Studio test"
                 )

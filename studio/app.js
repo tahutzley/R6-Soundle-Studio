@@ -2,8 +2,10 @@ import {
   calculateMapDistance,
   calculateRoundScore,
   formatDistance,
+  isTargetFloorCorrect,
   loadScoringConfig,
-} from "/game-assets/js/scoring.mjs";
+  targetPositionForFloor,
+} from "/game-assets/js/scoring.mjs?v=20260914-alternate-end-floor";
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -34,12 +36,14 @@ const markerInfo = {
 };
 
 const RECRUIT_ICON_URL = "/game-assets/operators/svg/recruit_gray.svg";
-const STUDIO_API_VERSION = 5;
+const STUDIO_API_VERSION = 6;
 const mapView = { zoom: 1, minZoom: 1, maxZoom: 6, centerX: .5, centerY: .5 };
 const mapPointers = new Map();
 let mapGesture = null;
 let autoSaveTimer = null;
 let autoSavePromise = Promise.resolve();
+let activePublishSetId = null;
+let publishProgressTimer = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -146,6 +150,13 @@ function markerToolStatus(position, floors) {
   return position ? floorStatusLabel(position.floorKey, floors) : "Unassigned";
 }
 
+function targetToolStatus(round, floors) {
+  const primary = markerToolStatus(round?.targetPos, floors);
+  return round?.alternateTargetFloorKey
+    ? `${primary} + ${floorStatusLabel(round.alternateTargetFloorKey, floors)}`
+    : primary;
+}
+
 function listenerDirectionStatus(listener) {
   if (!listener) return "N/A";
   return `${Number(listener.angle || 0).toFixed(1)}°`;
@@ -156,7 +167,7 @@ function markerToolDetails(round = selectedRound(), floors = selectedMap()?.floo
     ["listenerPos", "listener", "Listener", markerToolStatus(round?.listenerPos, floors)],
     ["listenerAngle", "direction", "Direction", listenerDirectionStatus(round?.listenerPos)],
     ["operatorStartPos", "start", "Runner Start", markerToolStatus(round?.operatorStartPos, floors)],
-    ["targetPos", "target", "Runner End", markerToolStatus(round?.targetPos, floors)],
+    ["targetPos", "target", "Runner End", targetToolStatus(round, floors)],
   ];
   if (state.current?.kind === "example") {
     details.push(["guessPos", "guess", "Guess", markerToolStatus(round?.guessPos, floors)]);
@@ -168,10 +179,11 @@ function exampleResult(round = selectedRound()) {
   if (state.current?.kind !== "example" || !state.scoring || !round?.guessPos || !round?.targetPos) {
     return null;
   }
-  const floor = selectedMap()?.floors.find((item) => item.key === round.targetPos.floorKey);
+  const target = targetPositionForFloor(round, round.guessPos.floorKey);
+  const floor = selectedMap()?.floors.find((item) => item.key === target.floorKey);
   if (!floor) return null;
-  const distance = calculateMapDistance(round.guessPos, round.targetPos, floor);
-  const floorCorrect = round.guessPos.floorKey === round.targetPos.floorKey;
+  const distance = calculateMapDistance(round.guessPos, target, floor);
+  const floorCorrect = isTargetFloorCorrect(round, round.guessPos.floorKey);
   return {
     distance,
     floorCorrect,
@@ -366,6 +378,20 @@ function fillMapSelect() {
     `<option value="${map.slug}">${escapeHtml(map.name)}</option>`).join("");
 }
 
+function renderAlternateTargetFloorField(round, floors) {
+  const select = $("#alternateTargetFloor");
+  const targetFloorKey = round?.targetPos?.floorKey;
+  const primaryLabel = floorStatusLabel(targetFloorKey, floors);
+  select.innerHTML = `<option value="">${targetFloorKey
+    ? `Only the marked floor (${escapeHtml(primaryLabel)})`
+    : "Place runner end first"}</option>` + floors
+    .filter((floor) => floor.key !== targetFloorKey)
+    .map((floor) => `<option value="${escapeHtml(floor.key)}">Also ${escapeHtml(floor.label)}</option>`)
+    .join("");
+  select.disabled = !targetFloorKey || floors.length < 2;
+  select.value = round?.alternateTargetFloorKey || "";
+}
+
 function renderEditor() {
   const item = state.current;
   $("#emptyState").hidden = Boolean(item);
@@ -407,6 +433,7 @@ function renderEditor() {
 
   const map = selectedMap();
   const floors = map?.floors || [];
+  renderAlternateTargetFloorField(round, floors);
   if (!floors.some((floor) => floor.key === state.floorKey)) {
     state.floorKey = round.listenerPos?.floorKey || floors[0]?.key || "";
   }
@@ -794,7 +821,9 @@ function drawMarkers() {
     ? Object.keys(markerInfo)
     : Object.keys(markerInfo).filter((key) => key !== "guessPos");
   $("#mapMarkers").innerHTML = markerKeys.map((key) => {
-    const position = round[key];
+    const position = key === "targetPos"
+      ? targetPositionForFloor(round, round.guessPos?.floorKey)
+      : round[key];
     if (!position || position.floorKey !== state.floorKey) return "";
     const point = viewportPoint(toAssetPoint(position));
     const style = `left:${point.x.toFixed(2)}px;top:${point.y.toFixed(2)}px`;
@@ -817,18 +846,19 @@ function drawMarkers() {
 
 function drawExampleResultLine(context, round) {
   if (state.current?.kind !== "example" || !round?.guessPos || !round?.targetPos) return;
-  const onResultFloor = [round.guessPos.floorKey, round.targetPos.floorKey].includes(state.floorKey);
+  const target = targetPositionForFloor(round, round.guessPos.floorKey);
+  const onResultFloor = [round.guessPos.floorKey, target.floorKey].includes(state.floorKey);
   if (!onResultFloor) return;
   const guess = viewportPoint(toAssetPoint(round.guessPos));
-  const target = viewportPoint(toAssetPoint(round.targetPos));
+  const targetPoint = viewportPoint(toAssetPoint(target));
   context.save();
   context.beginPath();
   context.setLineDash([8, 7]);
   context.strokeStyle = "#8ed8ff";
   context.lineWidth = 3;
-  context.globalAlpha = round.guessPos.floorKey === round.targetPos.floorKey ? .95 : .48;
+  context.globalAlpha = isTargetFloorCorrect(round, round.guessPos.floorKey) ? .95 : .48;
   context.moveTo(guess.x, guess.y);
-  context.lineTo(target.x, target.y);
+  context.lineTo(targetPoint.x, targetPoint.y);
   context.stroke();
   context.restore();
 }
@@ -994,6 +1024,9 @@ async function saveSet(status) {
   autoSaveTimer = null;
   await autoSavePromise.catch(() => {});
   state.current.name = $("#setName").value.trim();
+  // Capture the visible value at the approval boundary as well as on change,
+  // so the persisted request always matches what the editor is displaying.
+  selectedRound().alternateTargetFloorKey = $("#alternateTargetFloor").value || null;
   state.current.status = status;
   const saved = await api(`/api/sets/${state.current.id}`, {
     method: "PUT",
@@ -1085,7 +1118,35 @@ function updateImportCommitAvailability() {
   $("#commitDailySet").disabled = requiresConfirmation && !$("#allowStaleImport").checked;
 }
 
+function latestPublishAttempt(setId) {
+  const selected = state.sets.find((item) => item.id === setId);
+  if (!selected) return null;
+  return state.publishAttempts.find((item) =>
+    item.set_id === setId && Number(item.set_version) === Number(selected.version)) || null;
+}
+
+function publishProgress(attempt) {
+  if (!attempt) return { text: "Connecting to production…", detail: "Preparing the publish request." };
+  const objects = attempt.objects || [];
+  const verified = objects.filter((item) => item.status === "verified").length;
+  const transferred = objects.filter((item) => ["uploaded", "verified"].includes(item.status)).length;
+  if (verified === 9) {
+    return {
+      text: "Finalizing challenge…",
+      detail: "All 9 media objects are verified. Production is making the challenge live.",
+    };
+  }
+  if (transferred > 0) {
+    return {
+      text: `Uploading media (${transferred}/9)…`,
+      detail: `${transferred} of 9 media objects transferred; verification follows automatically.`,
+    };
+  }
+  return { text: "Preparing media…", detail: "Production is authorizing the 9 media uploads." };
+}
+
 function renderPublishing() {
+  const previousSelection = activePublishSetId || $("#publishSet").value;
   const approved = state.sets.filter((item) => (item.kind || "daily") === "daily" && item.status === "approved");
   const completed = new Set(state.publishAttempts
     .filter((item) => item.remote_release_version_id && ["released", "scheduled", "emergency_unavailable"].includes(item.remote_state || item.state))
@@ -1093,7 +1154,27 @@ function renderPublishing() {
   const available = approved.filter((item) => !completed.has(`${item.id}:${item.version}`));
   $("#publishSet").innerHTML = available.length ? available.map((item) =>
     `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("") : `<option value="">No approved unpublished sets</option>`;
-  $("#publishSetButton").disabled = !state.publisher.configured || !available.length;
+  if (available.some((item) => item.id === previousSelection)) $("#publishSet").value = previousSelection;
+  const selectedSetId = activePublishSetId || $("#publishSet").value;
+  const attempt = latestPublishAttempt(selectedSetId);
+  const progress = publishProgress(attempt);
+  const allMediaVerified = (attempt?.objects || []).length === 9 &&
+    attempt.objects.every((item) => item.status === "verified");
+  const button = $("#publishSetButton");
+  button.disabled = Boolean(activePublishSetId) || !state.publisher.configured || !available.length;
+  button.textContent = activePublishSetId
+    ? progress.text
+    : (attempt?.state === "upload_failed"
+      ? (allMediaVerified ? "Retry finalization" : "Resume upload")
+      : "Upload to production");
+  const status = $("#publishStatus");
+  status.hidden = !activePublishSetId && attempt?.state !== "upload_failed";
+  if (!status.hidden) {
+    status.dataset.state = attempt?.state === "upload_failed" && !activePublishSetId ? "error" : "working";
+    status.innerHTML = activePublishSetId
+      ? `<strong>${escapeHtml(progress.text)}</strong><span>${escapeHtml(progress.detail)}</span>`
+      : `<strong>Production publish did not finish</strong><span>${escapeHtml(attempt.error_summary || "Production rejected the final publish step.")} ${allMediaVerified ? "The media is already verified, so retrying will resume at finalization." : "Retrying will resume the saved upload."}</span>`;
+  }
   const productionAvailable = state.publisher.configured && state.productionChallenges.available;
   $("#publisherUnavailable").hidden = productionAvailable;
   $("#publisherUnavailable").textContent = state.publisher.configured
@@ -1145,6 +1226,7 @@ $("#mapSelect").addEventListener("change", (event) => {
   state.current.mapAssetVersion = state.catalog.assetVersion;
   state.current.rounds.forEach((round) => {
     round.listenerPos = round.operatorStartPos = round.targetPos = null;
+    round.alternateTargetFloorKey = null;
     if ("guessPos" in round) round.guessPos = null;
   });
   state.floorKey = map?.floors[0]?.key || "";
@@ -1187,6 +1269,11 @@ $("#captureSelect").addEventListener("change", (event) => {
   renderEditor();
   scheduleDraftSave();
 });
+$("#alternateTargetFloor").addEventListener("change", (event) => {
+  selectedRound().alternateTargetFloorKey = event.target.value || null;
+  renderEditor();
+  scheduleDraftSave();
+});
 $("#markerTools").addEventListener("click", (event) => {
   const button = event.target.closest("[data-tool]");
   if (!button) return;
@@ -1207,6 +1294,15 @@ function setMarkerPosition(key, event) {
     floorKey: state.floorKey,
     ...(key === "listenerPos" ? { angle: Number(previous?.angle) || 0 } : {}),
   };
+  if (
+    key === "targetPos" &&
+    selectedRound().alternateTargetFloorKey === state.floorKey
+  ) {
+    selectedRound().alternateTargetFloorKey = null;
+  }
+  if (key === "targetPos") {
+    renderAlternateTargetFloorField(selectedRound(), selectedMap()?.floors || []);
+  }
   updateMarkerToolStatuses();
   drawMarkers();
 }
@@ -1355,7 +1451,15 @@ $("#mapCanvas").addEventListener("keydown", (event) => {
 $("#mapZoomIn").addEventListener("click", () => zoomMapAt(mapView.zoom + .5));
 $("#mapZoomOut").addEventListener("click", () => zoomMapAt(mapView.zoom - .5));
 $("#clearRound").addEventListener("click", () => {
-  const round = { position: state.roundIndex + 1, operatorId: null, listenerPos: null, operatorStartPos: null, targetPos: null, captureId: null };
+  const round = {
+    position: state.roundIndex + 1,
+    operatorId: null,
+    listenerPos: null,
+    operatorStartPos: null,
+    targetPos: null,
+    alternateTargetFloorKey: null,
+    captureId: null,
+  };
   if (state.current.kind === "example") round.guessPos = null;
   state.current.rounds[state.roundIndex] = round;
   renderEditor();
@@ -1473,23 +1577,44 @@ $("#importCapture").addEventListener("click", async () => {
 $("#publishSetButton").addEventListener("click", async () => {
   const button = $("#publishSetButton");
   if (button.disabled) return;
-  button.disabled = true;
-  button.textContent = "Uploading & verifying…";
   try {
     const setId = $("#publishSet").value;
     const selected = state.sets.find((item) => item.id === setId);
     if (!selected) throw new Error("Choose an approved set to publish");
     if (!window.confirm(`Upload “${selected.name}” to production and make it playable immediately?`)) return;
+    activePublishSetId = setId;
+    renderPublishing();
+    let pollRunning = false;
+    publishProgressTimer = window.setInterval(async () => {
+      if (pollRunning) return;
+      pollRunning = true;
+      try {
+        state.publishAttempts = await api("/api/publish-attempts");
+        renderPublishing();
+      } catch {
+        // The primary publish request reports connection failures; progress polling is best-effort.
+      } finally {
+        pollRunning = false;
+      }
+    }, 750);
     await api("/api/publish", { method: "POST", body: JSON.stringify({ setId }) });
     await refreshData();
     toast("Nine media objects verified; challenge is live in production");
   } catch (error) {
+    try {
+      state.publishAttempts = await api("/api/publish-attempts");
+    } catch {
+      // Keep the original publish error when Studio itself cannot refresh progress.
+    }
     toast(error.message);
   } finally {
-    button.disabled = false;
+    if (publishProgressTimer) window.clearInterval(publishProgressTimer);
+    publishProgressTimer = null;
+    activePublishSetId = null;
     renderPublishing();
   }
 });
+$("#publishSet").addEventListener("change", renderPublishing);
 $("#publishList").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-remove-challenge-id]");
   if (!button) return;

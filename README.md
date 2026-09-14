@@ -12,6 +12,9 @@ The current milestone is a local-first studio:
   dashed result line and calculates distance and points with the game-owned
   scoring rules.
 - All three rounds use the set's map, but each may use any floor.
+- A runner end can optionally accept one additional floor for staircase landings
+  that legitimately belong to either blueprint; guesses on either authored floor
+  avoid the wrong-floor penalty.
 - Listener evidence is stored as one JPEG from the beginning of the aligned
   POV plus an M4A audio track.
 - The replay is runner video with the aligned listener audio.
@@ -255,7 +258,10 @@ size/hash/MIME, and publishes the challenge immediately after all nine objects
 pass. There is no release date or midnight wait. Closing or restarting Studio
 is safe: the next action resumes the persisted remote attempt with fresh short
 upload authorizations. A stale map-asset version blocks publication until the
-set is reviewed and approved again.
+set is reviewed and approved again. While the request runs, the dialog reports
+media transfer counts, verification, and finalization separately. A failed
+attempt remains visible with its saved error and whether all nine objects are
+already verified, so retrying can resume instead of uploading them again.
 
 Production assigns an internal compatibility slot and a stable challenge ID;
 those details are not scheduling controls. More than one challenge can be
