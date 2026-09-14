@@ -12,9 +12,9 @@ const state = {
   scoring: null,
   sets: [],
   captures: [],
-  schedule: [],
   publishAttempts: [],
   publisher: { configured: false },
+  productionChallenges: { available: false, challenges: [] },
   libraryKind: "daily",
   current: null,
   roundIndex: 0,
@@ -34,7 +34,7 @@ const markerInfo = {
 };
 
 const RECRUIT_ICON_URL = "/game-assets/operators/svg/recruit_gray.svg";
-const STUDIO_API_VERSION = 4;
+const STUDIO_API_VERSION = 5;
 const mapView = { zoom: 1, minZoom: 1, maxZoom: 6, centerX: .5, centerY: .5 };
 const mapPointers = new Map();
 let mapGesture = null;
@@ -910,13 +910,13 @@ function updateListenerAngle(event) {
 }
 
 async function refreshData() {
-  [state.sets, state.captures, state.schedule, state.publishAttempts, state.publisher] = await Promise.all([
-    api("/api/sets"), api("/api/captures"), api("/api/schedule"),
-    api("/api/publish-attempts"), api("/api/publisher/status"),
+  [state.sets, state.captures, state.publishAttempts, state.publisher, state.productionChallenges] = await Promise.all([
+    api("/api/sets"), api("/api/captures"),
+    api("/api/publish-attempts"), api("/api/publisher/status"), api("/api/production/challenges"),
   ]);
   if (state.current) state.current = state.sets.find((item) => item.id === state.current.id) || null;
   renderEditor();
-  renderSchedule();
+  renderPublishing();
 }
 
 async function createSet() {
@@ -1011,7 +1011,7 @@ async function deleteSet(setId) {
   const setName = item.name || "Untitled set";
   const warning = item.kind === "example"
     ? "This removes it from the How to Play examples library."
-    : "This also removes it from the release calendar.";
+    : "Any immutable production publication history is retained.";
   if (!window.confirm(`Delete “${setName}”? ${warning}`)) return;
   if (state.current?.id === setId) {
     clearTimeout(autoSaveTimer);
@@ -1034,7 +1034,7 @@ const importStateCopy = {
   legacy_unindexed: ["Legacy daily set needs preparation", "Generate capture-v1 manifests for this set, then scan it again."],
   conflict: ["The import conflicts with Studio data", "Resolve the listed identity or draft conflict. No database rows have been changed."],
   reprocessed: ["Reprocessed capture content found", "Importing will replace changed capture metadata and return affected drafts to review."],
-  stale: ["A scheduled draft will become stale", "Confirm the stale transition before import. The affected set must be reviewed, approved, and rescheduled."],
+  stale: ["A published draft will become stale", "Confirm the stale transition before import. The affected set must be reviewed, approved, and uploaded again."],
   importing: ["Importing three rounds…", "Studio is revalidating the scan and committing captures plus the draft as one transaction."],
   success: ["Daily set imported", "All three captures are attached and ready to use. Complete the manual fields and review the attached media before approving the set."],
   retry: ["Import stopped safely", "Nothing was partially imported. Review the message, scan again, and retry."],
@@ -1085,63 +1085,28 @@ function updateImportCommitAvailability() {
   $("#commitDailySet").disabled = requiresConfirmation && !$("#allowStaleImport").checked;
 }
 
-function renderSchedule() {
+function renderPublishing() {
   const approved = state.sets.filter((item) => (item.kind || "daily") === "daily" && item.status === "approved");
-  $("#scheduleSet").innerHTML = approved.length ? approved.map((item) =>
-    `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("") : `<option value="">No approved sets</option>`;
-  $("#scheduleSetButton").textContent = state.publisher.configured ? "Upload & schedule" : "Schedule locally";
-  const attempts = new Map();
-  state.publishAttempts.forEach((item) => {
-    if (!attempts.has(item.release_date)) attempts.set(item.release_date, item);
-  });
-  const scheduled = new Map(state.schedule.map((item) => [item.release_date, item]));
-  const dates = [...new Set([...scheduled.keys(), ...attempts.keys()])].sort();
-  $("#scheduleList").innerHTML = dates.length ? dates.map((releaseDate) => {
-    const item = scheduled.get(releaseDate);
-    const attempt = attempts.get(releaseDate);
-    const setItem = state.sets.find((value) => value.id === (item?.set_id || attempt?.set_id));
-    const remoteState = attempt?.remote_state || attempt?.state;
-    const statusLabels = { emergency_unavailable: "stopped", superseded: "replaced" };
-    const status = statusLabels[remoteState] || remoteState || (item?.is_published ? "published" : "midnight ET");
-    const canRemove = Boolean(item && !item.is_published && !attempt);
-    const easternToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-    const canStop = Boolean(attempt && remoteState === "scheduled" && releaseDate > easternToday);
+  const completed = new Set(state.publishAttempts
+    .filter((item) => item.remote_release_version_id && ["released", "scheduled", "emergency_unavailable"].includes(item.remote_state || item.state))
+    .map((item) => `${item.set_id}:${item.set_version}`));
+  const available = approved.filter((item) => !completed.has(`${item.id}:${item.version}`));
+  $("#publishSet").innerHTML = available.length ? available.map((item) =>
+    `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("") : `<option value="">No approved unpublished sets</option>`;
+  $("#publishSetButton").disabled = !state.publisher.configured || !available.length;
+  const productionAvailable = state.publisher.configured && state.productionChallenges.available;
+  $("#publisherUnavailable").hidden = productionAvailable;
+  $("#publisherUnavailable").textContent = state.publisher.configured
+    ? (state.productionChallenges.error || "Production challenges could not be loaded. Check the publisher connection.")
+    : "Production publishing is not configured. Set the production publisher URL and credential, then restart Studio.";
+  const challenges = state.productionChallenges.challenges || [];
+  $("#publishList").innerHTML = productionAvailable && challenges.length ? challenges.map((challenge) => {
     return `
-    <div class="schedule-item">
-      <strong>${escapeHtml(releaseDate)}</strong>
-      <div>${escapeHtml(item?.set_name || setItem?.name || "Publish attempt")}${attempt?.error_summary ? `<small>${escapeHtml(attempt.error_summary)}</small>` : ""}</div>
-      <div class="schedule-actions">
-        <span class="pill ${escapeHtml(remoteState || "")}">${escapeHtml(status)}</span>
-        ${canRemove ? `<button type="button" class="schedule-remove" data-remove-release-date="${escapeHtml(releaseDate)}">Remove</button>` : ""}
-        ${canStop ? `<button type="button" class="schedule-remove" data-stop-release-date="${escapeHtml(releaseDate)}">Stop release</button>` : ""}
-      </div>
+    <div class="publication-item">
+      <div><strong>${escapeHtml(challenge.title || "Production challenge")}</strong><small>${escapeHtml(challenge.mapName || challenge.mapSlug)} · Challenge ${escapeHtml(challenge.number)}</small></div>
+      <button type="button" class="danger-subtle" data-remove-challenge-id="${escapeHtml(challenge.id)}">Remove</button>
     </div>`;
-  }).join("") : `<p class="hint">Nothing scheduled.</p>`;
-}
-
-async function removeScheduledRelease(releaseDate) {
-  const item = state.schedule.find((entry) => entry.release_date === releaseDate);
-  if (!item) return;
-  const label = item.set_name || "this set";
-  if (!window.confirm(`Remove ${releaseDate} — ${label} from the release calendar?`)) return;
-  await api(`/api/schedule/${encodeURIComponent(releaseDate)}`, { method: "DELETE" });
-  await refreshData();
-  toast("Scheduled release removed");
-}
-
-async function stopScheduledRelease(releaseDate) {
-  const attempt = state.publishAttempts.find((entry) => entry.release_date === releaseDate);
-  const setItem = state.sets.find((item) => item.id === attempt?.set_id);
-  if (!window.confirm(`Stop ${releaseDate} — ${setItem?.name || "this set"} from going live at midnight?`)) return;
-  const reason = window.prompt("Reason for stopping this scheduled release:", "Content needs correction");
-  if (reason === null) return;
-  if (!reason.trim()) throw new Error("A reason is required to stop a scheduled release");
-  await api(`/api/releases/${encodeURIComponent(releaseDate)}/stop`, {
-    method: "POST",
-    body: JSON.stringify({ reason: reason.trim() }),
-  });
-  await refreshData();
-  toast("Scheduled release stopped; you can now upload a replacement for the same date");
+  }).join("") : `<p class="hint">${productionAvailable ? "No challenges are currently live in production." : "Production challenges are unavailable."}</p>`;
 }
 
 $("#toggleLibrary").addEventListener("click", () => switchLibrary().catch((error) => toast(error.message)));
@@ -1444,16 +1409,7 @@ $("#importDailySet").addEventListener("click", async () => {
     openImportDialog(state.current?.id || null);
   } catch (error) { toast(error.message); }
 });
-$("#showSchedule").addEventListener("click", () => $("#scheduleDialog").showModal());
-$("#scheduleList").addEventListener("click", (event) => {
-  const removeButton = event.target.closest("[data-remove-release-date]");
-  if (removeButton) {
-    removeScheduledRelease(removeButton.dataset.removeReleaseDate).catch((error) => toast(error.message));
-    return;
-  }
-  const stopButton = event.target.closest("[data-stop-release-date]");
-  if (stopButton) stopScheduledRelease(stopButton.dataset.stopReleaseDate).catch((error) => toast(error.message));
-});
+$("#showPublish").addEventListener("click", () => $("#publishDialog").showModal());
 $("#scanDailySet").addEventListener("click", async () => {
   const directoryPath = $("#dailySetPath").value.trim();
   if (!directoryPath) {
@@ -1514,35 +1470,52 @@ $("#importCapture").addEventListener("click", async () => {
     toast("Capture imported and ready to use");
   } catch (error) { toast(error.message); }
 });
-$("#scheduleSetButton").addEventListener("click", async () => {
-  const button = $("#scheduleSetButton");
+$("#publishSetButton").addEventListener("click", async () => {
+  const button = $("#publishSetButton");
   if (button.disabled) return;
   button.disabled = true;
-  button.textContent = state.publisher.configured ? "Uploading & verifying…" : "Scheduling…";
+  button.textContent = "Uploading & verifying…";
   try {
-    const endpoint = state.publisher.configured ? "/api/publish" : "/api/schedule";
-    const releaseDate = $("#releaseDate").value;
-    const setId = $("#scheduleSet").value;
+    const setId = $("#publishSet").value;
     const selected = state.sets.find((item) => item.id === setId);
-    const existing = state.publishAttempts.find((item) => item.release_date === releaseDate && item.remote_release_version_id);
-    const remoteState = existing?.remote_state || existing?.state;
-    const isReplacement = Boolean(existing && ["scheduled", "released", "emergency_unavailable"].includes(remoteState)
-      && (remoteState === "emergency_unavailable" || existing.set_id !== setId || Number(existing.set_version) !== Number(selected?.version)));
-    let reason = null;
-    if (isReplacement) {
-      reason = window.prompt("Reason for replacing the existing release:", "Corrected scheduled daily set");
-      if (reason === null) return;
-      if (!reason.trim()) throw new Error("A reason is required to replace a remote release");
-      if (!window.confirm(`Replace the existing ${releaseDate} release with ${selected?.name || "this set"}?`)) return;
-    }
-    await api(endpoint, { method: "POST", body: JSON.stringify({ releaseDate, setId, reason }) });
+    if (!selected) throw new Error("Choose an approved set to publish");
+    if (!window.confirm(`Upload “${selected.name}” to production and make it playable immediately?`)) return;
+    await api("/api/publish", { method: "POST", body: JSON.stringify({ setId }) });
     await refreshData();
-    toast(state.publisher.configured ? "Nine media objects verified; release scheduled" : "Set scheduled locally for midnight ET");
+    toast("Nine media objects verified; challenge is live in production");
   } catch (error) {
     toast(error.message);
   } finally {
     button.disabled = false;
-    renderSchedule();
+    renderPublishing();
+  }
+});
+$("#publishList").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-remove-challenge-id]");
+  if (!button) return;
+  const challenge = (state.productionChallenges.challenges || [])
+    .find((item) => item.id === button.dataset.removeChallengeId);
+  if (!challenge) return;
+  const reason = window.prompt(
+    `Why are you removing “${challenge.title}” from production?`,
+    "Removed from production in Studio",
+  );
+  if (reason === null) return;
+  if (!reason.trim()) {
+    toast("Enter a reason for the production audit log");
+    return;
+  }
+  button.disabled = true;
+  try {
+    await api(`/api/production/challenges/${encodeURIComponent(challenge.id)}/remove`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason.trim() }),
+    });
+    await refreshData();
+    toast("Challenge removed from production");
+  } catch (error) {
+    button.disabled = false;
+    toast(error.message);
   }
 });
 $("#mapImage").addEventListener("load", resizeCanvas);
@@ -1557,7 +1530,6 @@ async function start() {
     ]);
     fillMapSelect();
     const easternDate = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
-    $("#releaseDate").value = easternDate;
     $("#previewDate").value = easternDate;
     await refreshData();
     $("#status").textContent = `${state.catalog.maps.length} maps · ${state.catalog.operators.length} operators`;

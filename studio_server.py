@@ -45,7 +45,7 @@ LOCAL_ENV_KEYS = frozenset({
     "R6_STUDIO_PUBLISHER_TOKEN",
 })
 PREVIEW_SCHEMA_VERSION = 1
-STUDIO_API_VERSION = 4
+STUDIO_API_VERSION = 5
 PREVIEW_TTL = timedelta(minutes=30)
 EASTERN = ZoneInfo("America/New_York")
 GAME_PREVIEW_ASSET_PREFIXES = (
@@ -1129,6 +1129,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"configured": self.app.publisher is not None})
             elif path == "/api/publish-attempts":
                 self._json(self.app.publisher.list_attempts() if self.app.publisher else [])
+            elif path == "/api/production/challenges":
+                if not self.app.publisher:
+                    self._json({"available": False, "challenges": []})
+                    return
+                try:
+                    catalog = self.app.publisher.list_remote_challenges()
+                    self._json({**catalog, "available": True})
+                except PublishClientError as error:
+                    self._json({"available": False, "challenges": [], "error": str(error)})
             elif path.startswith("/api/puzzles/"):
                 item = self.app.store.public_puzzle(path.rsplit("/", 1)[1])
                 self._json(item or {"error": "Puzzle is not released"}, 200 if item else 404)
@@ -1202,8 +1211,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.app.publisher:
                     self._json({"error": "Remote publisher is not configured"}, 409)
                     return
-                release_date = str(payload["releaseDate"])
                 set_id = str(payload["setId"])
+                if not payload.get("releaseDate"):
+                    self._json(self.app.publisher.publish_immediately(set_id), 201)
+                    return
+                release_date = str(payload["releaseDate"])
                 existing = self.app.publisher.latest_release_attempt(release_date)
                 expected_revision = None
                 reason = None
@@ -1238,6 +1250,19 @@ class Handler(BaseHTTPRequestHandler):
                 release_date = unquote(path.removeprefix("/api/releases/").removesuffix("/stop").rstrip("/"))
                 self._json(
                     self.app.publisher.stop_scheduled(release_date, str(payload.get("reason") or ""))
+                )
+            elif path.startswith("/api/production/challenges/") and path.endswith("/remove"):
+                if not self.app.publisher:
+                    self._json({"error": "Remote publisher is not configured"}, 409)
+                    return
+                challenge_id = unquote(
+                    path.removeprefix("/api/production/challenges/").removesuffix("/remove").rstrip("/")
+                )
+                self._json(
+                    self.app.publisher.remove_challenge(
+                        challenge_id,
+                        str(payload.get("reason") or ""),
+                    )
                 )
             elif path == "/api/releases/publish-due":
                 self._json({"published": self.app.store.publish_due()})

@@ -1,7 +1,7 @@
 # R6 Soundle Studio
 
 R6 Soundle Studio is the authoring and capture workspace for the game. It keeps
-recording, media processing, map coordination, set editing, and scheduling out
+recording, media processing, map coordination, set editing, and publishing out
 of the public game repository.
 
 The current milestone is a local-first studio:
@@ -15,14 +15,13 @@ The current milestone is a local-first studio:
 - Listener evidence is stored as one JPEG from the beginning of the aligned
   POV plus an M4A audio track.
 - The replay is runner video with the aligned listener audio.
-- Scheduling records a versioned set for midnight in `America/New_York`.
-- Published puzzle responses are time-gated by the server clock.
+- Production uploads publish a versioned challenge as soon as all media is verified.
 
 ## Start the studio
 
 Python 3.11 or newer is recommended. Install the pinned timezone database once
-so `America/New_York` release calculations behave identically on Windows and
-Unix:
+so legacy release and preview-date calculations behave identically on Windows
+and Unix:
 
 ```powershell
 python -m pip install -r requirements.txt
@@ -49,7 +48,7 @@ stored in `studio.db`; newly processed capture media is organized under
 
 Use the **Examples** button beside the new-set button to switch the sidebar to
 one-round How to Play authoring. Examples share the map, operator, marker, and
-processed-capture editor, but they cannot enter the release calendar or daily
+processed-capture editor, but they cannot be uploaded through the production
 publisher. Switch back with **Daily sets**.
 
 ## Capture with OBS
@@ -174,9 +173,10 @@ existing drafts before enabling import.
 The confirm action revalidates the scan fingerprint and commits exactly three
 capture upserts plus one new or compatible draft in a single SQLite
 transaction. An identical retry is a no-op. Captures are available immediately;
-there is no separate capture-approval step. If changed content is already attached to a
-scheduled set, Studio requires an explicit stale acknowledgment and advances
-the draft version so the old schedule cannot silently publish it.
+there is no separate capture-approval step. If changed content is already
+attached to a published set, Studio requires an explicit stale acknowledgment
+and advances the draft version so the existing production challenge remains
+immutable.
 
 The compatibility single-manifest importer remains available for one phase and
 uses the same capture-v1 validation. Additional processed roots can be allowed
@@ -225,7 +225,7 @@ Studio also vendors the game-owned `release-v1` schema and provenance metadata.
 Phase 4 establishes that compatibility boundary; the remote publisher does not
 use unsupported contract versions.
 
-## Upload and schedule a release
+## Upload a challenge to production
 
 Studio loads `R6_STUDIO_PUBLISHER_URL` and `R6_STUDIO_PUBLISHER_TOKEN` from the
 ignored repository-root `.env` file when it starts. Values may be unquoted:
@@ -247,29 +247,36 @@ $env:R6_STUDIO_PUBLISHER_URL = "http://127.0.0.1:4190"
 python studio_server.py
 ```
 
-Choose an approved set and date in **Release calendar**, then select **Upload &
-schedule**. Studio rechecks all capture sizes and SHA-256 values, negotiates the
-publisher capability contract, uploads exactly the pending still/audio/replay
-objects for all three rounds, asks the server to HEAD-verify size/hash/MIME, and
-finalizes only after all nine objects pass. Closing or restarting Studio is
-safe: the next action resumes the persisted remote attempt with fresh short
-upload authorizations. A stale map-asset version blocks publish until the set is
-reviewed and approved again.
+Choose an approved set in **Upload to production**, then select **Upload to
+production**. Studio rechecks all capture sizes and SHA-256 values, negotiates
+the publisher capability contract, uploads exactly the pending
+still/audio/replay objects for all three rounds, asks the server to HEAD-verify
+size/hash/MIME, and publishes the challenge immediately after all nine objects
+pass. There is no release date or midnight wait. Closing or restarting Studio
+is safe: the next action resumes the persisted remote attempt with fresh short
+upload authorizations. A stale map-asset version blocks publication until the
+set is reviewed and approved again.
 
-A future remote release shows **Stop release** in the calendar. Stopping asks
-for an audit reason and makes that revision unavailable without deleting its
-media or history. To change it, select the same date and another approved set,
-then use **Upload & schedule**; Studio asks for a replacement reason and creates
-a new revision that remains gated until that date's midnight ET.
+Production assigns an internal compatibility slot and a stable challenge ID;
+those details are not scheduling controls. More than one challenge can be
+published on the same day, and existing dated release history remains readable.
 
 The Phase 7 publisher bearer credential is required and read only from
 `R6_STUDIO_PUBLISHER_TOKEN`; it is never written to `studio.db`, browser state,
 logs, or an object-store request. Do not disable the Phase 7 bearer check or
 expose local simulation outside loopback.
 
-The game owns `contracts/publish-v1.schema.json`; Studio vendors the schema and
-source hash under `schemas/`. The publisher capability response must advertise
-v1 before Studio creates or resumes an attempt.
+The game owns the legacy `contracts/publish-v1.schema.json` contract and the
+immediate `contracts/publish-v2.schema.json` contract. Studio vendors both with
+source hashes under `schemas/`. The publisher capability response must
+advertise v2 immediate challenges before Studio creates or resumes a new
+production upload.
+
+The same dialog lists every challenge currently live in the configured
+production service, including challenges uploaded by an older Studio database.
+Select **Remove** and enter an audit reason to hide a challenge immediately.
+Removal revokes public challenge and media access while retaining immutable
+release and audit history; it does not hard-delete production records.
 
 ## Run checks
 

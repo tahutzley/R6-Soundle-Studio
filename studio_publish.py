@@ -1,6 +1,7 @@
 """Resumable Phase 6 publisher for the owner-only Studio application."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import uuid
@@ -9,7 +10,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -38,6 +39,10 @@ class PublisherClientProtocol(Protocol):
     def finalize(self, attempt_id: str) -> dict[str, Any]: ...
     def make_unavailable(
         self, release_date: str, expected_revision: int, reason: str, idempotency_key: str
+    ) -> dict[str, Any]: ...
+    def list_challenges(self) -> dict[str, Any]: ...
+    def remove_challenge(
+        self, challenge_id: str, reason: str, idempotency_key: str
     ) -> dict[str, Any]: ...
 
 
@@ -132,6 +137,20 @@ class PublisherClient:
             headers={"Idempotency-Key": idempotency_key},
         )
 
+    def list_challenges(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/challenges")
+
+    def remove_challenge(
+        self, challenge_id: str, reason: str, idempotency_key: str
+    ) -> dict[str, Any]:
+        encoded_id = quote(challenge_id, safe="")
+        return self._request(
+            "POST",
+            f"/admin/v1/challenges/{encoded_id}/unavailable",
+            body={"reason": reason},
+            headers={"Idempotency-Key": idempotency_key},
+        )
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -170,13 +189,14 @@ class StudioPublisher:
 
     def _bundle(
         self,
-        release_date: str,
+        release_date: str | None,
         set_id: str,
         *,
         expected_revision: int | None = None,
         reason: str | None = None,
     ) -> PublishBundle:
-        date.fromisoformat(release_date)
+        if release_date is not None:
+            date.fromisoformat(release_date)
         if (expected_revision is None) != (reason is None):
             raise ValueError("A correction requires both expected_revision and reason")
         if expected_revision is not None and expected_revision <= 0:
@@ -187,7 +207,7 @@ class StudioPublisher:
         if not item:
             raise KeyError("Set not found")
         if item.get("kind") != "daily":
-            raise ValueError("How-to examples cannot be published as daily releases")
+            raise ValueError("How-to examples cannot be published as challenges")
         if item["status"] != "approved":
             raise ValueError("Only an approved set can be published")
         if item["mapAssetVersion"] != self.catalog["assetVersion"]:
@@ -246,41 +266,45 @@ class StudioPublisher:
             }
             for floor in map_item["floors"]
         ]
+        puzzle = {
+            "mapName": item.get("mapName") or map_item["name"],
+            "mapSlug": item["mapSlug"],
+            "floorKey": floors[0]["key"],
+            "floors": floors,
+            "rounds": rounds,
+        }
         payload = {
-            "releaseDate": release_date,
             "authoringSetId": item["id"],
             "studioSetVersion": item["version"],
-            "schemaVersion": 1,
+            "schemaVersion": 1 if release_date is not None else 2,
             "scoringVersion": self.scoring_version,
             "mapAssetVersion": item["mapAssetVersion"],
-            "snapshot": {
-                "puzzle": {
-                    "date": release_date,
-                    "mapName": item.get("mapName") or map_item["name"],
-                    "mapSlug": item["mapSlug"],
-                    "floorKey": floors[0]["key"],
-                    "floors": floors,
-                    "rounds": rounds,
-                }
-            },
+            "snapshot": {"puzzle": puzzle},
             "media": media,
         }
+        if release_date is None:
+            payload["publishMode"] = "immediate"
+        else:
+            payload["releaseDate"] = release_date
+            puzzle["date"] = release_date
         if expected_revision is not None:
             payload["expectedRevision"] = expected_revision
             payload["reason"] = reason.strip()  # type: ignore[union-attr]
         return PublishBundle(payload, paths)
 
-    def _local_attempt(self, release_date: str, set_id: str, bundle: PublishBundle) -> dict[str, Any]:
+    def _local_attempt(self, release_date: str | None, set_id: str, bundle: PublishBundle) -> dict[str, Any]:
         with self.store.connect() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """SELECT * FROM publish_attempts
-                   WHERE release_date=? AND set_id=? AND set_version=?
-                   ORDER BY created_at DESC LIMIT 1""",
-                (release_date, set_id, bundle.payload["studioSetVersion"]),
-            ).fetchone()
-            if row:
+                   WHERE set_id=? AND set_version=?
+                     AND (? IS NULL OR release_date=?)
+                   ORDER BY created_at DESC""",
+                (set_id, bundle.payload["studioSetVersion"], release_date, release_date),
+            ).fetchall()
+            for row in rows:
                 prior = dict(row)
-                if json.loads(prior.get("request_json") or "{}") == bundle.payload:
+                persisted = json.loads(prior.get("request_json") or "{}")
+                if persisted == bundle.payload:
                     return prior
             now = __import__("studio_server").iso_utc()
             attempt_id = f"publish_{uuid.uuid4().hex[:16]}"
@@ -292,7 +316,7 @@ class StudioPublisher:
                    VALUES (?, ?, ?, ?, ?, 'approved', 0, ?, '[]', ?, ?)""",
                 (
                     attempt_id,
-                    release_date,
+                    release_date or "immediate",
                     set_id,
                     bundle.payload["studioSetVersion"],
                     idempotency_key,
@@ -349,6 +373,44 @@ class StudioPublisher:
         with self.store.connect() as connection:
             rows = connection.execute("SELECT * FROM publish_attempts ORDER BY updated_at DESC").fetchall()
         return [self._decode_attempt(dict(row)) for row in rows]
+
+    def list_remote_challenges(self) -> dict[str, Any]:
+        return self.client.list_challenges()
+
+    @staticmethod
+    def _challenge_id(attempt: Mapping[str, Any]) -> str | None:
+        response = attempt.get("last_response")
+        if not isinstance(response, Mapping):
+            return None
+        remote = response.get("publishAttempt")
+        if not isinstance(remote, Mapping):
+            remote = response
+        value = remote.get("challengeId")
+        return str(value) if value else None
+
+    def remove_challenge(self, challenge_id: str, reason: str) -> dict[str, Any]:
+        challenge_id = challenge_id.strip()
+        reason = reason.strip()
+        if not challenge_id:
+            raise ValueError("A challenge ID is required")
+        if not reason:
+            raise ValueError("A reason is required to remove a production challenge")
+        response = self.client.remove_challenge(
+            challenge_id,
+            reason,
+            f"studio-remove-{uuid.uuid4()}",
+        )
+        for attempt in self.list_attempts():
+            if self._challenge_id(attempt) != challenge_id:
+                continue
+            self._update_attempt(
+                attempt["id"],
+                remote_state=str(response.get("state") or "emergency_unavailable"),
+                transition_reason=reason,
+                transitioned_at=__import__("studio_server").iso_utc(),
+                last_response_json={"challengeId": challenge_id, "release": response},
+            )
+        return response
 
     @staticmethod
     def _release_revision(attempt: Mapping[str, Any]) -> int:
@@ -408,7 +470,12 @@ class StudioPublisher:
         remote_version_id = remote_attempt.get("remoteReleaseVersionId") or release.get("releaseVersionId")
         remote_state = str(release.get("state") or remote_attempt.get("state") or "scheduled")
         now = __import__("studio_server").iso_utc()
-        release_at = __import__("studio_server").release_at_for_date(attempt["release_date"])
+        release_at = str(
+            release.get("releaseAt")
+            or __import__("studio_server").release_at_for_date(attempt["release_date"])
+        )
+        snapshot = copy.deepcopy(bundle.payload["snapshot"]["puzzle"])
+        snapshot.setdefault("date", attempt["release_date"])
         with self.store.connect() as connection:
             if bundle.payload.get("expectedRevision") is not None:
                 connection.execute(
@@ -443,7 +510,7 @@ class StudioPublisher:
                     release_at,
                     attempt["set_id"],
                     attempt["set_version"],
-                    json.dumps(bundle.payload["snapshot"]["puzzle"], separators=(",", ":")),
+                    json.dumps(snapshot, separators=(",", ":")),
                     now,
                     remote_release_id,
                     remote_version_id,
@@ -468,7 +535,7 @@ class StudioPublisher:
 
     def publish(
         self,
-        release_date: str,
+        release_date: str | None,
         set_id: str,
         *,
         interrupt_after: int | None = None,
@@ -488,14 +555,18 @@ class StudioPublisher:
         try:
             capabilities = self.client.capabilities()
             supported = capabilities.get("publishSchemaVersions", {})
-            if int(supported.get("min", 0)) > 1 or int(supported.get("max", 0)) < 1:
-                raise PublishClientError("Publisher does not support Studio publish schema v1")
+            schema_version = int(bundle.payload["schemaVersion"])
+            if int(supported.get("min", 0)) > schema_version or int(supported.get("max", 0)) < schema_version:
+                raise PublishClientError(f"Publisher does not support Studio publish schema v{schema_version}")
+            if schema_version == 2 and capabilities.get("immediateChallenges") is not True:
+                raise PublishClientError("Publisher does not support immediate challenges")
             if decoded.get("remote_publish_attempt_id"):
                 remote = self.client.status(decoded["remote_publish_attempt_id"])
             else:
                 remote = self.client.prepare(bundle.payload, decoded["idempotency_key"])
                 decoded = self._update_attempt(
                     decoded["id"],
+                    release_date=str(remote["releaseDate"]),
                     state="uploading",
                     remote_publish_attempt_id=remote["publishAttemptId"],
                     objects_json=remote["objects"],
@@ -533,3 +604,11 @@ class StudioPublisher:
                     (str(error)[:500], __import__("studio_server").iso_utc(), decoded["id"]),
                 )
             raise
+
+    def publish_immediately(
+        self,
+        set_id: str,
+        *,
+        interrupt_after: int | None = None,
+    ) -> dict[str, Any]:
+        return self.publish(None, set_id, interrupt_after=interrupt_after)
