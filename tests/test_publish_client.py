@@ -22,6 +22,7 @@ sys.path.insert(0, str(STUDIO_ROOT))
 from server.app import create_app
 from server.config import Settings
 from server.repositories import InMemoryRepository
+from server.scoring import load_scoring_config
 from server.storage_filesystem import FilesystemStorage
 from studio_publish import PublishInterrupted, PublisherClient, StudioPublisher
 from studio_server import Store
@@ -228,7 +229,8 @@ class StudioPublishClientTests(unittest.TestCase):
             )
             test_client = TestClient(game, headers={"Authorization": f"Bearer {PUBLISHER_TOKEN}"})
             client = InProcessPublisherClient(test_client)
-            publisher = StudioPublisher(store, catalog, 5, client, now=lambda: now)
+            scoring_version = load_scoring_config().version
+            publisher = StudioPublisher(store, catalog, scoring_version, client, now=lambda: now)
             with self.assertRaises(PublishInterrupted):
                 if immediate:
                     publisher.publish_immediately(approved["id"], interrupt_after=interrupt_after)
@@ -247,7 +249,7 @@ class StudioPublishClientTests(unittest.TestCase):
                 ).fetchone()[0]
                 self.assertNotIn('"upload"', persisted)
 
-            restarted = StudioPublisher(store, catalog, 5, client, now=lambda: now)
+            restarted = StudioPublisher(store, catalog, scoring_version, client, now=lambda: now)
             completed = (
                 restarted.publish_immediately(approved["id"])
                 if immediate
