@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from threading import Lock, Thread
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlsplit
@@ -182,6 +183,8 @@ class PublishBundle:
 
 
 class StudioPublisher:
+    COMPLETED_REMOTE_STATES = frozenset({"released", "scheduled", "emergency_unavailable"})
+
     def __init__(
         self,
         store: Any,
@@ -390,6 +393,29 @@ class StudioPublisher:
         with self.store.connect() as connection:
             rows = connection.execute("SELECT * FROM publish_attempts ORDER BY updated_at DESC").fetchall()
         return [self._decode_attempt(dict(row)) for row in rows]
+
+    def publishable_sets(self) -> list[dict[str, Any]]:
+        """Approved daily sets whose current version is not live in production.
+
+        Queue order decides production challenge numbering, because production
+        allocates each immediate challenge the next internal slot and numbers a
+        map's challenges by release date. Sorting by name keeps "Set 1" ahead of
+        "Set 2" on the same map.
+        """
+        completed = {
+            (attempt["set_id"], int(attempt["set_version"]))
+            for attempt in self.list_attempts()
+            if attempt.get("remote_release_version_id")
+            and (attempt.get("remote_state") or attempt.get("state")) in self.COMPLETED_REMOTE_STATES
+        }
+        available = [
+            item
+            for item in self.store.list_sets()
+            if (item.get("kind") or "daily") == "daily"
+            and item["status"] == "approved"
+            and (item["id"], int(item["version"])) not in completed
+        ]
+        return sorted(available, key=lambda item: (item["name"], item["id"]))
 
     def list_remote_challenges(self) -> dict[str, Any]:
         return self.client.list_challenges()
@@ -629,3 +655,118 @@ class StudioPublisher:
         interrupt_after: int | None = None,
     ) -> dict[str, Any]:
         return self.publish(None, set_id, interrupt_after=interrupt_after)
+
+
+class PublishQueue:
+    """Serial background queue for uploading approved sets to production.
+
+    Publishes run one at a time on a single worker thread. That is a
+    requirement, not a simplification: production assigns every immediate
+    challenge the next free internal slot, so concurrent publishes would race
+    for the same date. A set that fails is recorded and the queue moves on to
+    the next one.
+    """
+
+    ACTIVE_STATES = frozenset({"queued", "running"})
+
+    def __init__(self, publisher: StudioPublisher) -> None:
+        self.publisher = publisher
+        self._lock = Lock()
+        self._jobs: list[dict[str, Any]] = []
+        self._worker: Thread | None = None
+
+    @property
+    def running(self) -> bool:
+        with self._lock:
+            return any(job["state"] == "running" for job in self._jobs)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            jobs = [dict(job) for job in self._jobs]
+        return {
+            "running": any(job["state"] == "running" for job in jobs),
+            "pending": sum(1 for job in jobs if job["state"] in self.ACTIVE_STATES),
+            "jobs": jobs,
+        }
+
+    def enqueue(self, set_ids: list[str] | None = None) -> dict[str, Any]:
+        if set_ids is None:
+            candidates = self.publisher.publishable_sets()
+        else:
+            publishable = {item["id"]: item for item in self.publisher.publishable_sets()}
+            candidates = []
+            for set_id in set_ids:
+                item = publishable.get(set_id)
+                if item is None:
+                    raise ValueError(f"{set_id} is not an approved set awaiting production")
+                candidates.append(item)
+        now = __import__("studio_server").iso_utc()
+        with self._lock:
+            active = {
+                job["setId"] for job in self._jobs if job["state"] in self.ACTIVE_STATES
+            }
+            added = 0
+            for item in candidates:
+                if item["id"] in active:
+                    continue
+                active.add(item["id"])
+                added += 1
+                self._jobs.append(
+                    {
+                        "setId": item["id"],
+                        "setVersion": int(item["version"]),
+                        "name": item["name"],
+                        "state": "queued",
+                        "error": None,
+                        "challengeId": None,
+                        "queuedAt": now,
+                        "startedAt": None,
+                        "finishedAt": None,
+                    }
+                )
+            if added and (self._worker is None or not self._worker.is_alive()):
+                self._worker = Thread(target=self._drain, name="studio-publish-queue", daemon=True)
+                self._worker.start()
+            jobs = [dict(job) for job in self._jobs]
+        return {
+            "running": any(job["state"] == "running" for job in jobs),
+            "pending": sum(1 for job in jobs if job["state"] in self.ACTIVE_STATES),
+            "added": added,
+            "jobs": jobs,
+        }
+
+    def clear(self) -> dict[str, Any]:
+        """Drop queued work and finished rows; a running publish is left alone."""
+        with self._lock:
+            self._jobs = [job for job in self._jobs if job["state"] == "running"]
+        return self.snapshot()
+
+    def _next_queued(self) -> dict[str, Any] | None:
+        with self._lock:
+            job = next((item for item in self._jobs if item["state"] == "queued"), None)
+            if job is None:
+                # Cleared under the same lock enqueue uses, so a set queued a
+                # moment ago cannot be stranded without a worker.
+                self._worker = None
+                return None
+            job["state"] = "running"
+            job["startedAt"] = __import__("studio_server").iso_utc()
+            return job
+
+    def _drain(self) -> None:
+        while True:
+            job = self._next_queued()
+            if job is None:
+                return
+            try:
+                attempt = self.publisher.publish_immediately(job["setId"])
+            except Exception as error:  # noqa: BLE001 - one bad set must not stop the queue
+                with self._lock:
+                    job["state"] = "failed"
+                    job["error"] = str(error)[:500]
+                    job["finishedAt"] = __import__("studio_server").iso_utc()
+            else:
+                with self._lock:
+                    job["state"] = "succeeded"
+                    job["challengeId"] = StudioPublisher._challenge_id(attempt)
+                    job["finishedAt"] = __import__("studio_server").iso_utc()

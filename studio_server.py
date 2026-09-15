@@ -32,7 +32,7 @@ from studio_import import (
     ScanChangedError,
     capture_content_fingerprint,
 )
-from studio_publish import PublishClientError, PublisherClient, StudioPublisher
+from studio_publish import PublishClientError, PublishQueue, PublisherClient, StudioPublisher
 
 
 ROOT = Path(__file__).resolve().parent
@@ -45,7 +45,7 @@ LOCAL_ENV_KEYS = frozenset({
     "R6_STUDIO_PUBLISHER_TOKEN",
 })
 PREVIEW_SCHEMA_VERSION = 1
-STUDIO_API_VERSION = 6
+STUDIO_API_VERSION = 7
 PREVIEW_TTL = timedelta(minutes=30)
 EASTERN = ZoneInfo("America/New_York")
 GAME_PREVIEW_ASSET_PREFIXES = (
@@ -941,6 +941,7 @@ class App:
         self.import_roots = tuple(root.expanduser().resolve() for root in self.import_roots)
         self.importer = DailySetImporter(self.store, self.import_roots, lambda: self.catalog)
         self.previews = PreviewSessions(self)
+        self.publish_queue = PublishQueue(self.publisher) if self.publisher else None
 
     def import_single_capture(self, manifest_path: Path) -> dict[str, Any]:
         try:
@@ -1149,6 +1150,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"configured": self.app.publisher is not None})
             elif path == "/api/publish-attempts":
                 self._json(self.app.publisher.list_attempts() if self.app.publisher else [])
+            elif path == "/api/publish-queue":
+                self._json(
+                    self.app.publish_queue.snapshot()
+                    if self.app.publish_queue
+                    else {"running": False, "pending": 0, "jobs": []}
+                )
             elif path == "/api/production/challenges":
                 if not self.app.publisher:
                     self._json({"available": False, "challenges": []})
@@ -1230,9 +1237,33 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif path == "/api/schedule":
                 self._json(self.app.store.schedule(str(payload["releaseDate"]), str(payload["setId"])), 201)
+            elif path == "/api/publish-queue":
+                if not self.app.publisher:
+                    self._json({"error": "Remote publisher is not configured"}, 409)
+                    return
+                requested = payload.get("setIds")
+                if requested is not None and not isinstance(requested, list):
+                    raise ValueError("setIds must be a list of set identifiers")
+                self._json(
+                    self.app.publish_queue.enqueue(
+                        [str(value) for value in requested] if requested is not None else None
+                    ),
+                    201,
+                )
+            elif path == "/api/publish-queue/clear":
+                if not self.app.publish_queue:
+                    self._json({"error": "Remote publisher is not configured"}, 409)
+                    return
+                self._json(self.app.publish_queue.clear())
             elif path == "/api/publish":
                 if not self.app.publisher:
                     self._json({"error": "Remote publisher is not configured"}, 409)
+                    return
+                if self.app.publish_queue and self.app.publish_queue.running:
+                    # Two publishes at once would race for the same production slot.
+                    self._json(
+                        {"error": "The publish queue is running; wait for it to finish"}, 409
+                    )
                     return
                 set_id = str(payload["setId"])
                 if not payload.get("releaseDate"):

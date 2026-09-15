@@ -17,6 +17,7 @@ const state = {
   publishAttempts: [],
   publisher: { configured: false },
   productionChallenges: { available: false, challenges: [] },
+  publishQueue: { running: false, pending: 0, jobs: [] },
   libraryKind: "daily",
   current: null,
   roundIndex: 0,
@@ -36,7 +37,7 @@ const markerInfo = {
 };
 
 const RECRUIT_ICON_URL = "/game-assets/operators/svg/recruit_gray.svg";
-const STUDIO_API_VERSION = 6;
+const STUDIO_API_VERSION = 7;
 const mapView = { zoom: 1, minZoom: 1, maxZoom: 6, centerX: .5, centerY: .5 };
 const mapPointers = new Map();
 let mapGesture = null;
@@ -44,6 +45,7 @@ let autoSaveTimer = null;
 let autoSavePromise = Promise.resolve();
 let activePublishSetId = null;
 let publishProgressTimer = null;
+let publishQueueTimer = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -942,10 +944,13 @@ function updateListenerAngle(event) {
 }
 
 async function refreshData() {
-  [state.sets, state.captures, state.publishAttempts, state.publisher, state.productionChallenges] = await Promise.all([
+  [state.sets, state.captures, state.publishAttempts, state.publisher, state.productionChallenges,
+    state.publishQueue] = await Promise.all([
     api("/api/sets"), api("/api/captures"),
     api("/api/publish-attempts"), api("/api/publisher/status"), api("/api/production/challenges"),
+    api("/api/publish-queue"),
   ]);
+  if (queueIsActive()) startQueuePolling();
   if (state.current) state.current = state.sets.find((item) => item.id === state.current.id) || null;
   renderEditor();
   renderPublishing();
@@ -1147,13 +1152,83 @@ function publishProgress(attempt) {
   return { text: "Preparing media…", detail: "Production is authorizing the 9 media uploads." };
 }
 
-function renderPublishing() {
-  const previousSelection = activePublishSetId || $("#publishSet").value;
+function availableSets() {
   const approved = state.sets.filter((item) => (item.kind || "daily") === "daily" && item.status === "approved");
   const completed = new Set(state.publishAttempts
     .filter((item) => item.remote_release_version_id && ["released", "scheduled", "emergency_unavailable"].includes(item.remote_state || item.state))
     .map((item) => `${item.set_id}:${item.set_version}`));
-  const available = approved.filter((item) => !completed.has(`${item.id}:${item.version}`));
+  return approved.filter((item) => !completed.has(`${item.id}:${item.version}`));
+}
+
+const QUEUE_STATE_LABEL = {
+  queued: "Queued",
+  running: "Uploading…",
+  succeeded: "Live",
+  failed: "Failed",
+};
+
+function queueIsActive() {
+  return (state.publishQueue.jobs || [])
+    .some((job) => job.state === "queued" || job.state === "running");
+}
+
+function startQueuePolling() {
+  if (publishQueueTimer) return;
+  let pollRunning = false;
+  publishQueueTimer = window.setInterval(async () => {
+    if (pollRunning) return;
+    pollRunning = true;
+    try {
+      const wasActive = queueIsActive();
+      [state.publishQueue, state.publishAttempts] = await Promise.all([
+        api("/api/publish-queue"), api("/api/publish-attempts"),
+      ]);
+      if (queueIsActive()) {
+        renderPublishing();
+      } else {
+        stopQueuePolling();
+        // The finished sets are now live, so reload the library and the
+        // production challenge list before the final render.
+        if (wasActive) await refreshData();
+        else renderPublishing();
+      }
+    } catch {
+      // Progress polling is best-effort; the queue keeps running on the server.
+    } finally {
+      pollRunning = false;
+    }
+  }, 1500);
+}
+
+function stopQueuePolling() {
+  if (publishQueueTimer) window.clearInterval(publishQueueTimer);
+  publishQueueTimer = null;
+}
+
+function renderPublishQueue(available) {
+  const jobs = state.publishQueue.jobs || [];
+  const active = queueIsActive();
+  const queueAll = $("#publishQueueAll");
+  queueAll.textContent = available.length ? `Upload all (${available.length})` : "Upload all";
+  queueAll.disabled = active || Boolean(activePublishSetId) ||
+    !state.publisher.configured || !available.length;
+  const clear = $("#publishQueueClear");
+  clear.hidden = !jobs.length;
+  clear.textContent = active ? "Stop after this set" : "Clear queue";
+  const list = $("#publishQueue");
+  list.hidden = !jobs.length;
+  list.innerHTML = jobs.map((job) => `
+    <div class="publish-queue-item" data-state="${escapeHtml(job.state)}">
+      <div><strong>${escapeHtml(job.name)}</strong>${job.error
+        ? `<small>${escapeHtml(job.error)}</small>`
+        : job.challengeId ? `<small>${escapeHtml(job.challengeId)}</small>` : ""}</div>
+      <span class="publish-queue-state">${escapeHtml(QUEUE_STATE_LABEL[job.state] || job.state)}</span>
+    </div>`).join("");
+}
+
+function renderPublishing() {
+  const previousSelection = activePublishSetId || $("#publishSet").value;
+  const available = availableSets();
   $("#publishSet").innerHTML = available.length ? available.map((item) =>
     `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("") : `<option value="">No approved unpublished sets</option>`;
   if (available.some((item) => item.id === previousSelection)) $("#publishSet").value = previousSelection;
@@ -1162,8 +1237,10 @@ function renderPublishing() {
   const progress = publishProgress(attempt);
   const allMediaVerified = (attempt?.objects || []).length === 9 &&
     attempt.objects.every((item) => item.status === "verified");
+  renderPublishQueue(available);
   const button = $("#publishSetButton");
-  button.disabled = Boolean(activePublishSetId) || !state.publisher.configured || !available.length;
+  button.disabled = Boolean(activePublishSetId) || !state.publisher.configured ||
+    !available.length || queueIsActive();
   button.textContent = activePublishSetId
     ? progress.text
     : (attempt?.state === "upload_failed"
@@ -1617,6 +1694,31 @@ $("#publishSetButton").addEventListener("click", async () => {
   }
 });
 $("#publishSet").addEventListener("change", renderPublishing);
+$("#publishQueueAll").addEventListener("click", async () => {
+  const button = $("#publishQueueAll");
+  if (button.disabled) return;
+  const count = availableSets().length;
+  if (!window.confirm(
+    `Upload ${count} ${count === 1 ? "set" : "sets"} to production? They publish one after another and each becomes playable as it finishes.`,
+  )) return;
+  button.disabled = true;
+  try {
+    state.publishQueue = await api("/api/publish-queue", { method: "POST", body: JSON.stringify({}) });
+    renderPublishing();
+    startQueuePolling();
+    toast(`Queued ${state.publishQueue.added} ${state.publishQueue.added === 1 ? "set" : "sets"} for production`);
+  } catch (error) {
+    toast(error.message);
+    renderPublishing();
+  }
+});
+$("#publishQueueClear").addEventListener("click", async () => {
+  try {
+    state.publishQueue = await api("/api/publish-queue/clear", { method: "POST", body: "{}" });
+    renderPublishing();
+    if (!queueIsActive()) stopQueuePolling();
+  } catch (error) { toast(error.message); }
+});
 $("#publishList").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-remove-challenge-id]");
   if (!button) return;

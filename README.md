@@ -270,6 +270,18 @@ media transfer counts, verification, and finalization separately. A failed
 attempt remains visible with its saved error and whether all nine objects are
 already verified, so retrying can resume instead of uploading them again.
 
+**Upload all** queues every approved set that is not already live instead of
+uploading them one at a time. The queue runs on the Studio server, so it keeps
+going when the dialog is closed or the page is refreshed, and the dialog lists
+each set with its state and, on failure, the publisher error. Publishes run
+strictly one after another: production allocates each immediate challenge the
+next internal slot, so overlapping uploads would race for the same date. A set
+that fails is recorded and the queue moves on to the next one. Queue order is
+by set name, which keeps a map's Set 1 ahead of its Set 2 in challenge
+numbering. While the queue runs, the single-set upload is refused with a
+conflict; **Stop after this set** drops the remaining queued sets and lets the
+running upload finish.
+
 Production assigns an internal compatibility slot and a stable challenge ID;
 those details are not scheduling controls. More than one challenge can be
 published on the same day, and existing dated release history remains readable.

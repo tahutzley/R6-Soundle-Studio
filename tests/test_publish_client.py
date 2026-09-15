@@ -4,12 +4,15 @@ import sys
 import hashlib
 import json
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from fastapi.testclient import TestClient
 
@@ -24,8 +27,14 @@ from server.config import Settings
 from server.repositories import InMemoryRepository
 from server.scoring import load_scoring_config
 from server.storage_filesystem import FilesystemStorage
-from studio_publish import PublishInterrupted, PublisherClient, StudioPublisher
-from studio_server import Store
+from studio_publish import (
+    PublishClientError,
+    PublishInterrupted,
+    PublishQueue,
+    PublisherClient,
+    StudioPublisher,
+)
+from studio_server import App, Server, Store
 from tests.capture_fixtures import write_capture
 
 
@@ -357,3 +366,173 @@ class StudioPublishClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StubPublisher:
+    """Stands in for StudioPublisher so the queue's own behaviour is isolated."""
+
+    def __init__(self, names: list[str], failures: frozenset[str] = frozenset()) -> None:
+        self.items = [
+            {"id": f"set_{name}", "name": name, "version": 3, "status": "approved", "kind": "daily"}
+            for name in names
+        ]
+        self.failures = failures
+        self.gate: threading.Event | None = None
+        self.started: list[str] = []
+        self.published: list[str] = []
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+
+    def publishable_sets(self) -> list[dict]:
+        return [item for item in self.items if item["id"] not in self.published]
+
+    def publish_immediately(self, set_id: str) -> dict:
+        with self._lock:
+            self.started.append(set_id)
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        try:
+            if self.gate is not None and not self.gate.wait(timeout=5):
+                raise AssertionError("Publish gate was never released")
+            if set_id in self.failures:
+                raise PublishClientError(f"Publisher rejected {set_id}")
+            self.published.append(set_id)
+            return {"last_response": {"publishAttempt": {"challengeId": f"bank-{set_id}"}}}
+        finally:
+            with self._lock:
+                self._active -= 1
+
+
+def drain(queue: PublishQueue, timeout: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snapshot = queue.snapshot()
+        if not snapshot["pending"]:
+            return snapshot
+        time.sleep(0.01)
+    raise AssertionError(f"Publish queue did not drain: {queue.snapshot()}")
+
+
+def wait_until(predicate, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("Condition was never met")
+
+
+class PublishQueueTests(unittest.TestCase):
+    def test_every_approved_set_publishes_one_at_a_time(self) -> None:
+        publisher = StubPublisher(["Bank", "Border", "Chalet"])
+        queue = PublishQueue(publisher)
+        enqueued = queue.enqueue()
+        self.assertEqual(enqueued["added"], 3)
+
+        jobs = drain(queue)["jobs"]
+        self.assertEqual([job["state"] for job in jobs], ["succeeded"] * 3)
+        self.assertEqual([job["name"] for job in jobs], ["Bank", "Border", "Chalet"])
+        self.assertEqual([job["challengeId"] for job in jobs],
+                         [f"bank-set_{name}" for name in ("Bank", "Border", "Chalet")])
+        # Production allocates each immediate challenge the next internal slot,
+        # so overlapping publishes would race for the same date.
+        self.assertEqual(publisher.max_active, 1)
+        self.assertEqual(publisher.published, ["set_Bank", "set_Border", "set_Chalet"])
+
+    def test_a_failing_set_does_not_stop_the_rest_of_the_queue(self) -> None:
+        publisher = StubPublisher(["Bank", "Border", "Chalet"], failures=frozenset({"set_Border"}))
+        queue = PublishQueue(publisher)
+        queue.enqueue()
+
+        jobs = drain(queue)["jobs"]
+        self.assertEqual([job["state"] for job in jobs], ["succeeded", "failed", "succeeded"])
+        self.assertIn("Publisher rejected set_Border", jobs[1]["error"])
+        self.assertIsNone(jobs[1]["challengeId"])
+        self.assertEqual(publisher.published, ["set_Bank", "set_Chalet"])
+
+    def test_a_set_already_waiting_is_not_queued_twice(self) -> None:
+        publisher = StubPublisher(["Bank", "Border"])
+        publisher.gate = threading.Event()
+        queue = PublishQueue(publisher)
+        queue.enqueue()
+        wait_until(lambda: queue.running)
+
+        again = queue.enqueue()
+        self.assertEqual(again["added"], 0)
+        self.assertEqual(len(again["jobs"]), 2)
+
+        publisher.gate.set()
+        jobs = drain(queue)["jobs"]
+        self.assertEqual([job["state"] for job in jobs], ["succeeded", "succeeded"])
+
+    def test_clearing_drops_queued_work_but_lets_the_running_publish_finish(self) -> None:
+        publisher = StubPublisher(["Bank", "Border", "Chalet"])
+        publisher.gate = threading.Event()
+        queue = PublishQueue(publisher)
+        queue.enqueue()
+        wait_until(lambda: queue.running)
+
+        cleared = queue.clear()
+        self.assertEqual([job["name"] for job in cleared["jobs"]], ["Bank"])
+        publisher.gate.set()
+
+        jobs = drain(queue)["jobs"]
+        self.assertEqual([job["state"] for job in jobs], ["succeeded"])
+        self.assertEqual(publisher.published, ["set_Bank"])
+        self.assertEqual(publisher.started, ["set_Bank"])
+
+    def test_a_set_outside_the_publishable_list_is_rejected(self) -> None:
+        queue = PublishQueue(StubPublisher(["Bank"]))
+        with self.assertRaisesRegex(ValueError, "awaiting production"):
+            queue.enqueue(["set_Missing"])
+        self.assertEqual(queue.snapshot()["jobs"], [])
+
+    def test_studio_routes_queue_every_set_and_report_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            publisher = StubPublisher(["Bank", "Border"])
+            publisher.gate = threading.Event()
+            app = App(Store(root / "studio.db"), root / "game", (root,), publisher)
+            server = Server(("127.0.0.1", 0), app)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                idle = json.loads(urlopen(f"{base}/api/publish-queue").read())
+                self.assertEqual(idle, {"running": False, "pending": 0, "jobs": []})
+
+                queued = json.loads(urlopen(Request(
+                    f"{base}/api/publish-queue",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )).read())
+                self.assertEqual(queued["added"], 2)
+
+                wait_until(lambda: app.publish_queue.running)
+                # A second publish path would race the queue for a release slot.
+                with self.assertRaises(HTTPError) as conflict:
+                    urlopen(Request(
+                        f"{base}/api/publish",
+                        data=json.dumps({"setId": "set_Border"}).encode(),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    ))
+                self.assertEqual(conflict.exception.code, 409)
+                conflict.exception.close()
+
+                publisher.gate.set()
+                drain(app.publish_queue)
+                finished = json.loads(urlopen(f"{base}/api/publish-queue").read())
+                self.assertEqual([job["state"] for job in finished["jobs"]], ["succeeded", "succeeded"])
+
+                emptied = json.loads(urlopen(Request(
+                    f"{base}/api/publish-queue/clear",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )).read())
+                self.assertEqual(emptied, {"running": False, "pending": 0, "jobs": []})
+            finally:
+                server.shutdown()
+                server.server_close()
