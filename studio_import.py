@@ -21,6 +21,11 @@ from processor.capture_contract import (
 
 
 MAP_SET_PATTERN = re.compile(r"^(?P<number>[1-9][0-9]*)-(?P<slug>[a-z0-9]+(?:-[a-z0-9]+)*)$")
+CAPTURE_MAP_SLUG_ALIASES = {
+    "casino": "calypso-casino",
+    "nighthaven": "nighthavenlabs",
+    "theme": "themepark",
+}
 BACKUP_PATTERN = re.compile(r"^\.[123]\.backup-[0-9TZ._+-]+-[a-f0-9]{8}$")
 ROUND_FILES = {"capture.json", "listener.jpg", "listener.m4a", "replay.mp4"}
 LEGACY_MEDIA_FILES = ROUND_FILES - {"capture.json"}
@@ -188,7 +193,8 @@ class DailySetImporter:
         if not match:
             raise DailySetImportError("Daily-set directories must be named <set-number>-<map-slug>")
         map_set = directory.name
-        map_slug = match.group("slug")
+        capture_map_slug = match.group("slug")
+        map_slug = CAPTURE_MAP_SLUG_ALIASES.get(capture_map_slug, capture_map_slug)
         set_number = int(match.group("number"))
         scan_id = uuid.uuid4().hex
         entries = {entry.name: entry for entry in directory.iterdir()}
@@ -255,7 +261,11 @@ class DailySetImporter:
                         manifest = read_and_validate_capture(manifest_path)
                         _validate_durations(manifest)
                         source = manifest["source"]
-                        if source["mapSet"] != map_set or source["mapSlug"] != map_slug or source["setNumber"] != set_number:
+                        if (
+                            source["mapSet"] != map_set
+                            or source["mapSlug"] != capture_map_slug
+                            or source["setNumber"] != set_number
+                        ):
                             raise CaptureValidationError("manifest source does not match the daily-set directory")
                         if source["slot"] != slot:
                             raise CaptureValidationError("manifest slot does not match its round directory")

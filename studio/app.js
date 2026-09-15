@@ -499,9 +499,11 @@ function renderCapturePreview() {
     return;
   }
   const captureId = encodeURIComponent(capture.id);
-  const replaySource = `/media/${captureId}/replay.mp4`;
+  const captureVersion = encodeURIComponent(capture.contentFingerprint || capture.updatedAt || "");
+  const versionQuery = captureVersion ? `?v=${captureVersion}` : "";
+  const replaySource = `/media/${captureId}/replay.mp4${versionQuery}`;
   $("#capturePreview").innerHTML = `
-    <img src="/media/${captureId}/listener.jpg" alt="Listener POV still">
+    <img src="/media/${captureId}/listener.jpg${versionQuery}" alt="Listener POV still">
     ${audioPlayerMarkup(replaySource)}`;
   setupCaptureAudioPlayer($("#capturePreview .studio-audio-player"));
 }

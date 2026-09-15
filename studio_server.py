@@ -609,12 +609,17 @@ class Store:
         for source in item["rounds"]:
             capture = captures[source["captureId"]]
             media_id = quote(capture["id"], safe="")
+            media_version = quote(
+                str(capture.get("contentFingerprint") or capture.get("updatedAt") or ""),
+                safe="",
+            )
+            version_query = f"?v={media_version}" if media_version else ""
             rounds.append(
                 {
                     **source,
-                    "evidenceImageUrl": f"/media/{media_id}/listener.jpg",
-                    "audioUrl": f"/media/{media_id}/listener.m4a",
-                    "replayVideoUrl": f"/media/{media_id}/replay.mp4",
+                    "evidenceImageUrl": f"/media/{media_id}/listener.jpg{version_query}",
+                    "audioUrl": f"/media/{media_id}/listener.m4a{version_query}",
+                    "replayVideoUrl": f"/media/{media_id}/replay.mp4{version_query}",
                 }
             )
         return {
@@ -1161,7 +1166,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not candidate or not candidate.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND)
                 else:
-                    self._serve_file(candidate.parent, candidate.name)
+                    # Capture IDs and URLs remain stable when owner media is
+                    # intentionally reprocessed, so these responses must not
+                    # outlive the bytes currently recorded in Studio.
+                    self._serve_file(candidate.parent, candidate.name, no_store=True)
             elif path.startswith("/game-assets/"):
                 self._serve_file(self.app.game_repo / "assets", path[len("/game-assets/"):])
             else:

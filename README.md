@@ -99,6 +99,13 @@ naming format:
 <mapset-number>-<map>-<slot>-<listener|runner>.mp4
 ```
 
+The short capture names `casino`, `kafe`, `nighthaven`, and `theme` are
+supported. Studio imports those map-set folders as Calypso Casino, Kafe
+Dostoyevsky, Nighthaven Labs, and Theme Park respectively, while preserving the
+short folder names and capture IDs. For example, `2-casino-1-listener.mp4` is
+processed under `daily sets\2-casino` and imported with the game's canonical
+`calypso-casino` map slug.
+
 For example, `1-clubhouse-3-listener.mp4` and
 `1-clubhouse-3-runner.mp4` are one pair. Before processing starts, the command
 checks that every key has exactly one listener and one runner. The processor

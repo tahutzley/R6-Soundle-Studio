@@ -298,9 +298,19 @@ class StudioStoreTests(unittest.TestCase):
         puzzle = self.store.public_puzzle("2020-01-02", datetime(2020, 1, 2, 6, tzinfo=timezone.utc))
         self.assertIsNotNone(puzzle)
         self.assertEqual(3, len(puzzle["rounds"]))
-        self.assertEqual("/media/1-bank%2F1/listener.jpg", puzzle["rounds"][0]["evidenceImageUrl"])
-        self.assertEqual("/media/1-bank%2F1/listener.m4a", puzzle["rounds"][0]["audioUrl"])
-        self.assertEqual("/media/1-bank%2F1/replay.mp4", puzzle["rounds"][0]["replayVideoUrl"])
+        media_version = self.store.get_capture("1-bank/1")["contentFingerprint"]
+        self.assertEqual(
+            f"/media/1-bank%2F1/listener.jpg?v={media_version}",
+            puzzle["rounds"][0]["evidenceImageUrl"],
+        )
+        self.assertEqual(
+            f"/media/1-bank%2F1/listener.m4a?v={media_version}",
+            puzzle["rounds"][0]["audioUrl"],
+        )
+        self.assertEqual(
+            f"/media/1-bank%2F1/replay.mp4?v={media_version}",
+            puzzle["rounds"][0]["replayVideoUrl"],
+        )
 
     def test_unpublished_schedule_can_be_removed_without_deleting_its_set(self) -> None:
         item = self.store.save_set({"name": "Scheduled", "mapSlug": "bank"})

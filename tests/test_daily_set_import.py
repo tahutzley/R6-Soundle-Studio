@@ -18,7 +18,13 @@ from tests.capture_fixtures import write_capture, write_daily_set
 def catalog() -> dict:
     return {
         "assetVersion": "test-map-assets",
-        "maps": [{"slug": "bank", "name": "Bank", "floors": [{"key": "1f"}]}],
+        "maps": [
+            {"slug": "bank", "name": "Bank", "floors": [{"key": "1f"}]},
+            {"slug": "calypso-casino", "name": "Calypso Casino", "floors": [{"key": "1f"}]},
+            {"slug": "kafe", "name": "Kafe Dostoyevsky", "floors": [{"key": "1f"}]},
+            {"slug": "nighthavenlabs", "name": "Nighthaven Labs", "floors": [{"key": "1f"}]},
+            {"slug": "themepark", "name": "Theme Park", "floors": [{"key": "1f"}]},
+        ],
         "operators": [{"id": "vigil", "name": "Vigil"}],
     }
 
@@ -66,6 +72,35 @@ class DailySetImportTests(unittest.TestCase):
         self.assertEqual(["1-bank/1", "1-bank/2", "1-bank/3"], [item["captureId"] for item in result["set"]["rounds"]])
         self.assertEqual("1-bank", result["set"]["importedMapSet"])
         self.assertTrue(all(item["status"] == "available" for item in result["captures"]))
+
+    def test_short_capture_map_names_import_as_canonical_game_maps(self) -> None:
+        cases = (
+            (1, "casino", "calypso-casino", "Calypso Casino"),
+            (2, "kafe", "kafe", "Kafe Dostoyevsky"),
+            (3, "nighthaven", "nighthavenlabs", "Nighthaven Labs"),
+            (4, "theme", "themepark", "Theme Park"),
+        )
+
+        for set_number, capture_slug, game_slug, map_name in cases:
+            with self.subTest(capture_slug=capture_slug):
+                directory = write_daily_set(
+                    self.import_root,
+                    map_slug=capture_slug,
+                    set_number=set_number,
+                )
+                scan = self.importer.scan(directory.name)
+                result = self.importer.commit(scan["scanId"])
+
+                self.assertEqual("valid", scan["state"])
+                self.assertEqual(f"{set_number}-{capture_slug}", scan["source"]["mapSet"])
+                self.assertEqual(game_slug, scan["source"]["mapSlug"])
+                self.assertEqual(map_name, scan["source"]["mapName"])
+                self.assertEqual(game_slug, result["set"]["mapSlug"])
+                self.assertEqual(f"{set_number}-{capture_slug}", result["set"]["importedMapSet"])
+                self.assertEqual(
+                    [f"{set_number}-{capture_slug}/{slot}" for slot in (1, 2, 3)],
+                    [item["id"] for item in result["captures"]],
+                )
 
     def test_zero_two_and_four_round_directories_create_no_rows(self) -> None:
         cases = []
@@ -280,6 +315,7 @@ class DailySetImportTests(unittest.TestCase):
             with urlopen(f"http://127.0.0.1:{server.server_port}/media/1-bank%2F1/listener.jpg") as media_response:
                 media_body = media_response.read()
                 accept_ranges = media_response.headers["Accept-Ranges"]
+                media_cache_control = media_response.headers["Cache-Control"]
             replay_body = b"video:1:original"
             range_request = Request(
                 f"http://127.0.0.1:{server.server_port}/media/1-bank%2F1/replay.mp4",
@@ -290,6 +326,7 @@ class DailySetImportTests(unittest.TestCase):
                 range_status = range_response.status
                 content_range = range_response.headers["Content-Range"]
                 range_length = range_response.headers["Content-Length"]
+                range_cache_control = range_response.headers["Cache-Control"]
             invalid_range = Request(
                 f"http://127.0.0.1:{server.server_port}/media/1-bank%2F1/replay.mp4",
                 headers={"Range": "bytes=999-1000"},
@@ -309,10 +346,12 @@ class DailySetImportTests(unittest.TestCase):
         self.assertEqual("available", result["captures"][0]["status"])
         self.assertEqual(b"jpeg:1:original", media_body)
         self.assertEqual("bytes", accept_ranges)
+        self.assertEqual("no-store", media_cache_control)
         self.assertEqual(HTTPStatus.PARTIAL_CONTENT, range_status)
         self.assertEqual(replay_body[2:8], range_body)
         self.assertEqual(f"bytes 2-7/{len(replay_body)}", content_range)
         self.assertEqual("6", range_length)
+        self.assertEqual("no-store", range_cache_control)
         self.assertEqual(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, invalid_status)
         self.assertEqual(f"bytes */{len(replay_body)}", invalid_content_range)
         self.assertEqual((3, 1), self.counts())
