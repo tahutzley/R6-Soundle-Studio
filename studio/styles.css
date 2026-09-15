@@ -273,6 +273,14 @@ dialog::backdrop { background: #020407d1; backdrop-filter: blur(4px); }
 .stale-confirmation input { width: 18px; min-height: 18px; margin: 0; }
 .legacy-import { margin: 14px 0 18px; color: var(--muted); font-size: .8rem; }
 .legacy-import summary { cursor: pointer; }
+.queue-controls { display: flex; gap: 7px; margin: -8px 0 16px; }
+.publish-queue { display: grid; gap: 2px; max-height: 34vh; margin: -6px 0 16px; overflow: auto; }
+.publish-queue-item { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: baseline; padding: 7px 10px; border-left: 3px solid var(--line); background: var(--bg-void); }
+.publish-queue-item[data-state="running"] { border-left-color: var(--blue); }
+.publish-queue-item[data-state="succeeded"] { border-left-color: var(--green); }
+.publish-queue-item[data-state="failed"] { border-left-color: var(--red); }
+.publish-queue-item small { display: block; margin-top: .3rem; color: var(--muted); }
+.publish-queue-state { color: var(--muted); font-size: .74rem; text-transform: uppercase; letter-spacing: .04em; }
 .publication-list { display: grid; gap: 8px; max-height: 58vh; margin-top: 12px; overflow: auto; }
 .publish-status { display: grid; gap: 3px; margin: -6px 0 16px; padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--blue); background: var(--bg-void); }
 .publish-status[hidden] { display: none; }

@@ -189,7 +189,12 @@
           <select id="publishSet"></select>
           <button type="button" class="primary" id="publishSetButton">Upload to production</button>
         </div>
+        <div class="queue-controls">
+          <button type="button" id="publishQueueAll">Upload all</button>
+          <button type="button" class="danger-subtle" id="publishQueueClear" hidden>Clear queue</button>
+        </div>
         <div id="publishStatus" class="publish-status" aria-live="polite" hidden></div>
+        <div id="publishQueue" class="publish-queue" aria-live="polite" hidden></div>
         <p class="hint" id="publisherUnavailable" hidden>Production publishing is not configured. Set the production publisher URL and credential, then restart Studio.</p>
         <h3>Live production challenges</h3>
         <p class="hint">Remove immediately hides a challenge and blocks its media. Its audit history is retained.</p>
@@ -198,6 +203,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status"></div>
-    <script type="module" src="/app.js?v=20260914-api-v6"></script>
+    <script type="module" src="/app.js?v=20260915-publish-queue"></script>
   </body>
 </html>
